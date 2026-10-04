@@ -79,7 +79,9 @@ It does not install or sign in to providers, persist provider logins, update the
 
 Missing packages are installed automatically on apt-based images (Debian, Ubuntu) and dnf-based images (Fedora, RHEL family). On anything else the build stops and lists what to add to the base image. Slim images work.
 
-The **Test** workflow in this repository builds a container with the feature and runs the test suite on each image in its matrix, on x64 and arm64 runners. That matrix is the list of images known to work; check its latest run before relying on an image that is not in it.
+The **Test** workflow in this repository builds a container with the feature and runs the test suite on x64 and arm64 runners, for the images in its matrix and the variants in `test/t3-server/scenarios.json`. Those are the setups known to work; check the latest run before relying on one that is not among them.
+
+The remote user's UID may differ from the one in the image: dev container tools change it to match the host user. The data volume's owner is repaired at container start when the entrypoint runs as root, or through password-less `sudo` otherwise.
 
 ### Dev container tools
 
@@ -161,7 +163,7 @@ Run `t3-pair 38101` in the container and paste the link into **Add environment**
 | Build fails with `needs a non-root remoteUser`    | Set `remoteUser` in `devcontainer.json`, or use `"ssh": false`.                                                                                      |
 | Build fails with `~/.t3 already exists`           | Something else provides `~/.t3` (a mount, or files in the image). Remove it; the feature links that path to its own volume.                          |
 | `t3-server status`: not running after start       | See [Dev container tools](#dev-container-tools).                                                                                                     |
-| `t3-server start`: `is not writable`              | The data volume is not mounted, or belongs to another user because `remoteUser` changed after the volume was created. Remove the volume and rebuild. |
+| `t3-server start`: `is not writable`              | The data volume belongs to another UID and could not be repaired, which needs root or password-less `sudo`. Run `t3-server start` once as root (`docker exec -u root <container> t3-server start`). |
 | `t3-dev sync` lists nothing                       | The container is not running, was built without the feature, has `"ssh": false`, or the feature skipped itself (`"strict": false`; the build log says why). |
 | SSH: `no running dev container for ...`           | The container stopped. Start it; no re-sync is needed.                                                                                               |
 | SSH: host key changed                             | The data volume was recreated. Run `t3-dev sync`, which forgets the old key.                                                                         |

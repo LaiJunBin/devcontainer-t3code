@@ -252,6 +252,9 @@ EOF
   # Password-less login through that one sshd only: the system sshd, if any,
   # keeps PermitEmptyPasswords at its default of "no".
   passwd -d "$REMOTE_USER" >/dev/null
+else
+  # Leave nothing behind from a layer that had the option on.
+  rm -f "${SHARE_DIR}/ssh-session" "${SHARE_DIR}/sshd_config"
 fi
 
 echo "t3-server feature: installed T3 Code ${VERSION} (${arch}), server user '${REMOTE_USER}', host ${HOST}, ssh ${SSH}"

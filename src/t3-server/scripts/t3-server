@@ -35,6 +35,24 @@ fail() {
   exit 1
 }
 
+# The volume keeps the owner it was created with at image build. Dev container
+# tools may then change the remote user's UID to match the host user, which
+# leaves the volume owned by a UID nobody has. Whoever can fix that does: root
+# directly, the user through password-less sudo where the image offers it.
+repair_data_owner() {
+  [ -d "$DATA_DIR" ] || return 0
+  local want have owner
+  want="$(id -u "$T3_SERVER_USER" 2>/dev/null)" || return 0
+  have="$(stat -c %u "$DATA_DIR" 2>/dev/null)" || return 0
+  [ "$want" = "$have" ] && return 0
+  owner="${T3_SERVER_USER}:$(id -gn "$T3_SERVER_USER")"
+  if [ "$(id -u)" -eq 0 ]; then
+    chown -R "$owner" "$DATA_DIR" 2>/dev/null || true
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -n chown -R "$owner" "$DATA_DIR" 2>/dev/null || true
+  fi
+}
+
 # The server owns the data volume and uses the user's provider logins, so every
 # command runs as the configured user. Root (the entrypoint) drops to it.
 ensure_server_user() {
@@ -87,7 +105,7 @@ redact() {
 
 require_data_dir() {
   if [ ! -d "$DATA_DIR" ] || [ ! -w "$DATA_DIR" ]; then
-    fail "${DATA_DIR} is not writable by $(id -un); is the feature's volume mounted?"
+    fail "${DATA_DIR} is not writable by $(id -un) (owner uid $(stat -c %u "$DATA_DIR" 2>/dev/null || echo '?'), yours $(id -u)). Run 't3-server start' once as root to repair it"
   fi
 }
 
@@ -215,6 +233,7 @@ case "$command" in
     ;;
 esac
 
+repair_data_owner
 ensure_server_user "$@"
 shift
 case "$command" in

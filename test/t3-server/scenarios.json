@@ -1,0 +1,27 @@
+{
+  "plain_ubuntu": {
+    "image": "ubuntu:24.04",
+    "remoteUser": "ubuntu",
+    "features": {
+      "t3-server": {}
+    }
+  },
+  "debian_slim_root_no_ssh": {
+    "image": "debian:12-slim",
+    "features": {
+      "t3-server": { "ssh": false }
+    }
+  },
+  "rocky_root_no_ssh": {
+    "image": "rockylinux:9",
+    "features": {
+      "t3-server": { "ssh": false }
+    }
+  },
+  "not_strict_skips_root_image": {
+    "image": "debian:12-slim",
+    "features": {
+      "t3-server": { "strict": false }
+    }
+  }
+}

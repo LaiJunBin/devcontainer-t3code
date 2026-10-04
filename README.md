@@ -53,7 +53,7 @@ Containers are matched by workspace folder, in either the form VS Code records f
 
 ## Support
 
-Maintained on a best-effort basis. What is known to work is what the **Test** workflow builds and tests: the images in its matrix, on x64 and arm64. `t3-dev` is exercised by hand on Windows 11 with Docker in WSL 2. Reports for other setups are welcome, with the image name and the output; fixes may or may not follow.
+Maintained on a best-effort basis. What is known to work is what the **Test** workflow builds and tests, on x64 and arm64: the images in its matrix and the variants in `test/t3-server/scenarios.json`. `t3-dev` is exercised by hand on Windows 11 with Docker in WSL 2. Reports for other setups are welcome, with the image name and the output; fixes may or may not follow.
 
 ## Maintaining
 
@@ -89,4 +89,5 @@ src/t3-server/
   README.md                   user documentation
 host/t3-dev                   host-side helper (WSL)
 test/t3-server/test.sh        checks run by `devcontainer features test`
+test/t3-server/scenarios.json other images and option sets to run them on
 ```
