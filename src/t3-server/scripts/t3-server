@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# Controls the T3 Code server installed by the t3-server dev container feature.
+set -euo pipefail
+
+CONFIG="${T3_SERVER_CONFIG:-/usr/local/share/t3-server/config}"
+# shellcheck source=/dev/null
+. "$CONFIG"
+
+DATA_DIR="$T3_SERVER_DATA_DIR"
+# The server's home is ~/.t3, which the feature links to the data volume. A
+# T3 Code client connecting over SSH looks there for a server to reuse.
+T3_HOME="${T3_SERVER_USER_HOME}/.t3"
+INSTALLED_RUNTIME="/opt/t3-server/versions/${T3_SERVER_VERSION}"
+LOG_FILE="${DATA_DIR}/server.log"
+PID_FILE="${DATA_DIR}/server.pid"
+HOST_KEY="${DATA_DIR}/ssh/ssh_host_ed25519_key"
+PORT="${T3CODE_PORT:-$T3_SERVER_PORT}"
+READY_URL="http://127.0.0.1:${PORT}/.well-known/t3/environment"
+READY_TIMEOUT_SECONDS=60
+
+usage() {
+  cat <<EOF
+Usage: t3-server <command>
+
+  status            show whether the server is running and answering
+  start [--no-wait] start it in the background (no-op if already running)
+  stop              stop it
+  restart           stop, then start
+  logs [-n LINES]   show the server log without pairing secrets
+EOF
+}
+
+fail() {
+  echo "t3-server: $1" >&2
+  exit 1
+}
+
+# The server owns the data volume and uses the user's provider logins, so every
+# command runs as the configured user. Root (the entrypoint) drops to it.
+ensure_server_user() {
+  [ "$(id -un)" = "$T3_SERVER_USER" ] && return 0
+  [ "$(id -u)" -eq 0 ] || fail "run this as '${T3_SERVER_USER}' (current user: $(id -un))"
+  id "$T3_SERVER_USER" >/dev/null 2>&1 || fail "user '${T3_SERVER_USER}' does not exist in this container"
+  local identity=("HOME=${T3_SERVER_USER_HOME}" "USER=${T3_SERVER_USER}" "LOGNAME=${T3_SERVER_USER}")
+  if command -v runuser >/dev/null 2>&1; then
+    exec runuser -u "$T3_SERVER_USER" -- env "${identity[@]}" "$0" "$@"
+  fi
+  if command -v setpriv >/dev/null 2>&1; then
+    exec setpriv --reuid "$T3_SERVER_USER" --regid "$(id -gn "$T3_SERVER_USER")" --init-groups \
+      env "${identity[@]}" "$0" "$@"
+  fi
+  fail "cannot switch to '${T3_SERVER_USER}': neither runuser nor setpriv is available"
+}
+
+server_pid() {
+  local pid
+  [ -f "$PID_FILE" ] || return 1
+  pid="$(cat "$PID_FILE" 2>/dev/null)" || return 1
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # The pid file lives in the volume and outlives the container's processes.
+  # After a restart the same low pid belongs to something else, often one of
+  # this feature's own scripts, so the match has to be the exact command.
+  local args
+  args="$(tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null)" || return 1
+  [ "$args" = "/usr/local/bin/t3 serve " ] || return 1
+  echo "$pid"
+}
+
+is_ready() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 2 -o /dev/null "$READY_URL" 2>/dev/null
+    return
+  fi
+  timeout 2 bash -c "
+    exec 3<>/dev/tcp/127.0.0.1/${PORT} &&
+    printf 'GET /.well-known/t3/environment HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n' >&3 &&
+    head -n 1 <&3 | grep -q ' 200'
+  " 2>/dev/null
+}
+
+# At startup the server prints an administrative pairing token three ways: as
+# a token, inside a URL, and as a terminal QR code of that URL.
+redact() {
+  grep -v -e "Token:" -e "Pairing URL:" -e "pairingUrl" -e "[█▀▄]" || true
+}
+
+require_data_dir() {
+  if [ ! -d "$DATA_DIR" ] || [ ! -w "$DATA_DIR" ]; then
+    fail "${DATA_DIR} is not writable by $(id -un); is the feature's volume mounted?"
+  fi
+}
+
+# Everything in the data volume that has to exist before a server or an SSH
+# session starts. Safe to run repeatedly.
+cmd_prepare() {
+  require_data_dir
+  umask 077
+
+  # A client of the same version connecting over SSH checks this path before
+  # downloading the server; pointing it at the image's verified copy skips
+  # the download. A real directory there was put by a client and is left alone.
+  local runtime_link="${T3_HOME}/runtime/versions/${T3_SERVER_VERSION}"
+  mkdir -p "${T3_HOME}/runtime/versions"
+  if [ -L "$runtime_link" ] || [ ! -e "$runtime_link" ]; then
+    ln -sfn "$INSTALLED_RUNTIME" "$runtime_link"
+  fi
+
+  if [ "${T3_SERVER_SSH:-false}" = "true" ] && [ ! -f "$HOST_KEY" ]; then
+    mkdir -p "$(dirname "$HOST_KEY")"
+    ssh-keygen -q -t ed25519 -N "" -C "t3-server" -f "$HOST_KEY"
+  fi
+}
+
+cmd_status() {
+  local pid
+  if ! pid="$(server_pid)"; then
+    echo "t3-server: not running (T3 Code ${T3_SERVER_VERSION})"
+    return 3
+  fi
+  if is_ready; then
+    echo "t3-server: running, pid ${pid}, T3 Code ${T3_SERVER_VERSION}, ${T3CODE_HOST:-$T3_SERVER_HOST}:${PORT} in the container"
+    return 0
+  fi
+  echo "t3-server: process ${pid} is up but not answering on port ${PORT} yet"
+  return 4
+}
+
+cmd_start() {
+  local wait_for_ready=true pid
+  [ "${1:-}" = "--no-wait" ] && wait_for_ready=false
+
+  if pid="$(server_pid)"; then
+    echo "t3-server: already running, pid ${pid}"
+    return 0
+  fi
+  cmd_prepare
+
+  umask 077
+  [ -f "$LOG_FILE" ] && mv -f "$LOG_FILE" "${LOG_FILE}.1"
+  # Started from / because the server only serves diffs for directories under
+  # the one it was launched in. setsid detaches it from the caller's session.
+  (
+    cd /
+    export PATH="${HOME}/.local/bin:${PATH}"
+    export T3CODE_HOME="$T3_HOME"
+    export T3CODE_HOST="${T3CODE_HOST:-$T3_SERVER_HOST}"
+    export T3CODE_PORT="$PORT"
+    export T3CODE_NO_BROWSER=1
+    export T3CODE_TELEMETRY_ENABLED="${T3CODE_TELEMETRY_ENABLED:-false}"
+    exec setsid nohup /usr/local/bin/t3 serve >"$LOG_FILE" 2>&1 </dev/null
+  ) &
+  echo "$!" >"$PID_FILE"
+
+  if ! "$wait_for_ready"; then
+    echo "t3-server: starting, pid $(cat "$PID_FILE")"
+    return 0
+  fi
+  local elapsed=0
+  while [ "$elapsed" -lt "$READY_TIMEOUT_SECONDS" ]; do
+    if is_ready; then
+      echo "t3-server: running, pid $(cat "$PID_FILE"), port ${PORT} in the container"
+      return 0
+    fi
+    if ! server_pid >/dev/null; then
+      echo "t3-server: the server exited during startup. Last log lines:" >&2
+      tail -n 20 "$LOG_FILE" 2>/dev/null | redact >&2
+      return 1
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "t3-server: not ready after ${READY_TIMEOUT_SECONDS}s; see 't3-server logs'" >&2
+  return 1
+}
+
+cmd_stop() {
+  local pid waited=0
+  if ! pid="$(server_pid)"; then
+    rm -f "$PID_FILE"
+    echo "t3-server: not running"
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 10 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+  echo "t3-server: stopped"
+}
+
+cmd_logs() {
+  local lines=50
+  if [ "${1:-}" = "-n" ] && [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+    lines="$2"
+  fi
+  [ -f "$LOG_FILE" ] || fail "no log yet at ${LOG_FILE}"
+  tail -n "$lines" "$LOG_FILE" | redact
+}
+
+command="${1:-}"
+case "$command" in
+  status | start | stop | restart | logs | prepare) ;;
+  -h | --help | help | "")
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+
+ensure_server_user "$@"
+shift
+case "$command" in
+  prepare) cmd_prepare ;;
+  status) cmd_status ;;
+  start) cmd_start "$@" ;;
+  stop) cmd_stop ;;
+  restart)
+    cmd_stop
+    cmd_start "$@"
+    ;;
+  logs) cmd_logs "$@" ;;
+esac

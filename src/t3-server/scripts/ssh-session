@@ -1,0 +1,28 @@
+#!/bin/sh
+# One SSH session over stdin/stdout, started through `docker exec`:
+#
+#   docker exec -i -u root <container> /usr/local/share/t3-server/ssh-session
+#
+# No sshd daemon runs in the container and no port is opened. The only way to
+# reach this sshd is `docker exec`, which already gives full access to the
+# container, so the login needs no key or password.
+set -eu
+
+SHARE_DIR=/usr/local/share/t3-server
+# shellcheck source=/dev/null
+. "${SHARE_DIR}/config"
+
+[ "$(id -u)" -eq 0 ] || {
+  echo "ssh-session: run with 'docker exec -u root'" >&2
+  exit 1
+}
+
+# sshd refuses to start without its privilege separation directory, and /run
+# is empty again after every container start on some runtimes.
+mkdir -p /run/sshd
+chmod 0755 /run/sshd
+
+# The host key lives in the data volume so it survives image rebuilds.
+/usr/local/bin/t3-server prepare >/dev/null
+
+exec /usr/sbin/sshd -i -f "${SHARE_DIR}/sshd_config"

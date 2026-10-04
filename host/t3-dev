@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+# Host-side helper for the t3-server dev container feature, for Docker running
+# inside WSL with the T3 Code desktop app on Windows.
+#
+# It makes each dev container that has the feature show up as an SSH host named
+# t3-<folder> for Windows' ssh.exe, which is what T3 Code's SSH connection mode
+# uses. Nothing is published and no SSH daemon runs: the connection is carried
+# over `docker exec`.
+set -euo pipefail
+
+MANAGED_NAME=t3-containers.conf
+KNOWN_HOSTS_NAME=known_hosts_t3_containers
+INCLUDE_LINE="Include ${MANAGED_NAME}"
+INSTALL_PATH="${HOME}/.local/bin/t3-dev"
+STATE_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/t3-dev/state"
+UNIT_NAME=t3-dev-watch.service
+UNIT_PATH="${HOME}/.config/systemd/user/${UNIT_NAME}"
+SESSION=/usr/local/share/t3-server/ssh-session
+FEATURE_CONFIG=/usr/local/share/t3-server/config
+
+usage() {
+  cat <<EOF
+Usage: t3-dev <command>
+
+  setup     one-time: install this tool, hook it into Windows' SSH config, and
+            keep the host list in sync automatically where systemd is available
+  sync      write the running dev containers that have the feature as SSH hosts
+  list      show the SSH hosts written by the last sync
+  watch     sync whenever a container starts or stops (what the service runs)
+  remove    undo setup
+
+In T3 Code: Settings → Connections → Add environment → SSH, then pick or type
+one of the t3-<folder> names.
+EOF
+}
+
+fail() {
+  echo "t3-dev: $1" >&2
+  exit 1
+}
+
+# Everything that needs Windows interop or the interactive PATH is resolved
+# once, in setup, and stored. The watch service and ssh's ProxyCommand run with
+# a bare environment where cmd.exe is not reachable.
+T3_DEV_SSH_DIR=""
+T3_DEV_DISTRO=""
+T3_DEV_DOCKER=""
+
+load_state() {
+  [ -f "$STATE_FILE" ] || fail "not set up yet; run 't3-dev setup' first"
+  # shellcheck source=/dev/null
+  . "$STATE_FILE"
+  if [ -z "$T3_DEV_SSH_DIR" ] || [ -z "$T3_DEV_DISTRO" ] || [ ! -x "$T3_DEV_DOCKER" ]; then
+    fail "${STATE_FILE} is incomplete; run 't3-dev setup' again"
+  fi
+}
+
+# The Windows user profile as a WSL path. T3_DEV_WINHOME overrides it for tests.
+windows_home() {
+  if [ -n "${T3_DEV_WINHOME:-}" ]; then
+    printf '%s' "$T3_DEV_WINHOME"
+    return
+  fi
+  command -v cmd.exe >/dev/null 2>&1 || fail "cmd.exe not found; run setup from a WSL terminal"
+  local profile
+  profile="$(cd /mnt/c && cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r')"
+  [ -n "$profile" ] || fail "could not read the Windows user profile path"
+  wslpath -u "$profile"
+}
+
+# VS Code records a WSL folder as \\wsl.localhost\<distro>\home\... while the
+# devcontainer CLI records /home/...; compare them in the Linux form. A folder
+# on a Windows drive (c:\...) has no Linux form and is kept as it is.
+normalize_folder() {
+  local folder="$1"
+  case "$folder" in
+    '\\wsl'*)
+      folder="${folder//\\//}"
+      folder="/${folder#//*/*/}"
+      ;;
+  esac
+  printf '%s' "${folder%/}"
+}
+
+# A folder as one shell-safe word, for the ProxyCommand line: any path works,
+# including ones with spaces or backslashes.
+encode_folder() {
+  printf '%s' "$1" | base64 -w0 | tr '+/' '-_' | tr -d '='
+}
+
+decode_folder() {
+  local value="$1"
+  case $((${#value} % 4)) in
+    2) value="${value}==" ;;
+    3) value="${value}=" ;;
+  esac
+  printf '%s' "$value" | tr -- '-_' '+/' | base64 -d 2>/dev/null
+}
+
+# Prints "<container id>\t<folder>" for every running dev container.
+running_dev_containers() {
+  local id folder
+  while IFS=$'\t' read -r id folder; do
+    [ -n "$folder" ] || continue
+    printf '%s\t%s\n' "$id" "$(normalize_folder "$folder")"
+  done < <("$T3_DEV_DOCKER" ps --format '{{.ID}}\t{{.Label "devcontainer.local_folder"}}')
+}
+
+# The user-level systemd manager is what keeps the watcher running. Without it
+# (older WSL, systemd disabled) the tool still works with a manual 'sync'.
+have_user_systemd() {
+  command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1
+}
+
+install_watch_service() {
+  mkdir -p "$(dirname "$UNIT_PATH")"
+  cat >"$UNIT_PATH" <<EOF
+[Unit]
+Description=Keep T3 Code's SSH host list in sync with running dev containers
+
+[Service]
+ExecStart=${INSTALL_PATH} watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT_NAME" >/dev/null 2>&1
+  systemctl --user restart "$UNIT_NAME"
+}
+
+cmd_setup() {
+  local win_home ssh_dir config docker_bin
+  win_home="$(windows_home)"
+  [ -n "${WSL_DISTRO_NAME:-}" ] || fail "WSL_DISTRO_NAME is not set; run setup from a WSL terminal"
+  docker_bin="$(command -v docker)" || fail "docker not found on PATH"
+  ssh_dir="${win_home}/.ssh"
+  config="${ssh_dir}/config"
+
+  if [ "$(readlink -f "$0")" != "$(readlink -f "$INSTALL_PATH" 2>/dev/null || true)" ]; then
+    mkdir -p "$(dirname "$INSTALL_PATH")"
+    install -m 0755 "$0" "$INSTALL_PATH"
+  fi
+
+  mkdir -p "$(dirname "$STATE_FILE")"
+  {
+    echo "# Written by 't3-dev setup'."
+    printf 'T3_DEV_SSH_DIR=%q\n' "$ssh_dir"
+    printf 'T3_DEV_DISTRO=%q\n' "$WSL_DISTRO_NAME"
+    printf 'T3_DEV_DOCKER=%q\n' "$(readlink -f "$docker_bin")"
+  } >"$STATE_FILE"
+
+  mkdir -p "$ssh_dir"
+  [ -f "${ssh_dir}/${MANAGED_NAME}" ] || : >"${ssh_dir}/${MANAGED_NAME}"
+  # Include has to come before any Host block to apply to the whole file.
+  if [ ! -f "$config" ]; then
+    printf '%s\n' "$INCLUDE_LINE" >"$config"
+  elif ! grep -qxF "$INCLUDE_LINE" "$config"; then
+    [ -f "${config}.before-t3" ] || cp "$config" "${config}.before-t3"
+    { printf '%s\n\n' "$INCLUDE_LINE"; cat "$config"; } >"${config}.tmp"
+    mv "${config}.tmp" "$config"
+  fi
+
+  echo "t3-dev: installed to ${INSTALL_PATH} and hooked into Windows' SSH config."
+  "$INSTALL_PATH" sync || true
+  if [ -n "${T3_DEV_NO_SERVICE:-}" ]; then
+    :
+  elif have_user_systemd && install_watch_service; then
+    echo "t3-dev: the host list now follows your containers automatically (${UNIT_NAME})."
+    echo "  Check it with: systemctl --user status ${UNIT_NAME}"
+  else
+    echo "t3-dev: no user systemd here, so run 't3-dev sync' after starting a new project's container."
+  fi
+}
+
+cmd_sync() {
+  load_state
+  local ssh_dir="$T3_DEV_SSH_DIR" managed id folder user name base count=0
+  managed="${ssh_dir}/${MANAGED_NAME}"
+  if ! grep -qxF "$INCLUDE_LINE" "${ssh_dir}/config" 2>/dev/null; then
+    fail "the Include line is missing from ${ssh_dir}/config; run 't3-dev setup' again"
+  fi
+
+  local tmp seen=" "
+  tmp="$(mktemp)"
+  {
+    echo "# Written by 't3-dev sync'. Do not edit; rerun the command instead."
+    echo "# Each host is a dev container in WSL (${T3_DEV_DISTRO}), reached over 'docker exec'."
+  } >"$tmp"
+
+  while IFS=$'\t' read -r id folder; do
+    "$T3_DEV_DOCKER" exec "$id" test -x "$SESSION" </dev/null 2>/dev/null || continue
+    user="$("$T3_DEV_DOCKER" exec "$id" sh -c ". ${FEATURE_CONFIG} && printf %s \"\$T3_SERVER_USER\"" </dev/null 2>/dev/null)" || continue
+    [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]] || continue
+
+    # The last path component, whichever separator the folder uses.
+    base="${folder//\\//}"
+    base="$(basename "$base" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-\n' '-')"
+    name="t3-${base}"
+    local suffix=2
+    while [[ "$seen" == *" ${name} "* ]]; do
+      name="t3-${base}-${suffix}"
+      suffix=$((suffix + 1))
+    done
+    seen="${seen}${name} "
+
+    cat >>"$tmp" <<EOF
+
+# ${folder}
+Host ${name}
+    User ${user}
+    ProxyCommand wsl.exe -d ${T3_DEV_DISTRO} -- ${INSTALL_PATH} connect ${name} $(encode_folder "$folder")
+    PubkeyAuthentication no
+    UserKnownHostsFile ~/.ssh/${KNOWN_HOSTS_NAME}
+    StrictHostKeyChecking accept-new
+    LogLevel ERROR
+EOF
+    printf '  %-28s %s\n' "$name" "$folder"
+    count=$((count + 1))
+  done < <(running_dev_containers)
+
+  # A stopped container keeps its entry: connecting to it reports that it is
+  # not running, which is more useful than the host vanishing from the list.
+  if [ -f "$managed" ]; then
+    local kept
+    kept="$(carry_over_stopped "$managed" "$seen")"
+    if [ -n "$kept" ]; then
+      printf '%s\n' "$kept" >>"$tmp"
+    fi
+  fi
+
+  if [ -f "$managed" ] && cmp -s "$tmp" "$managed"; then
+    rm -f "$tmp"
+  else
+    cat "$tmp" >"$managed"
+    rm -f "$tmp"
+    # Host keys change when a container's data volume is recreated; forgetting
+    # them here keeps that from turning into a "host key changed" error.
+    rm -f "${ssh_dir}/${KNOWN_HOSTS_NAME}"
+  fi
+
+  if [ "$count" -eq 0 ]; then
+    echo "t3-dev: no running dev container has the t3-server feature with ssh enabled."
+  else
+    echo "t3-dev: ${count} running host(s). In T3 Code: Add environment → SSH → one of the names above."
+  fi
+}
+
+# Prints the entries of the previous host file ($1) that are not among the
+# names just written ($2, space-separated) and whose workspace folder still
+# exists: a stopped container stays listed, a deleted project does not.
+carry_over_stopped() {
+  local file="$1" seen="$2" line folder="" name="" block=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "# Written by"* | "# Each host"*) ;;
+      "# "*)
+        emit_carried_block "$name" "$folder" "$block" "$seen"
+        folder="${line#\# }"
+        name=""
+        block="$line"
+        ;;
+      "Host "*)
+        name="${line#Host }"
+        block+=$'\n'"$line"
+        ;;
+      "    "*)
+        [ -n "$block" ] && block+=$'\n'"$line"
+        ;;
+    esac
+  done <"$file"
+  emit_carried_block "$name" "$folder" "$block" "$seen"
+}
+
+emit_carried_block() {
+  local name="$1" folder="$2" block="$3" seen="$4"
+  [ -n "$name" ] || return 0
+  [[ "$seen" == *" ${name} "* ]] && return 0
+  # Only Linux paths can be checked from here; others are kept.
+  if [[ "$folder" == /* ]] && [ ! -d "$folder" ]; then
+    return 0
+  fi
+  printf '\n%s\n' "$block"
+}
+
+cmd_list() {
+  load_state
+  local managed="${T3_DEV_SSH_DIR}/${MANAGED_NAME}"
+  [ -f "$managed" ] || fail "nothing synced yet; run 't3-dev sync'"
+
+  # Hosts of stopped containers stay in the file, so say which ones are up.
+  local running=$'\n' id folder
+  while IFS=$'\t' read -r id folder; do
+    running+="${folder}"$'\n'
+  done < <(running_dev_containers 2>/dev/null)
+
+  local line state
+  folder=""
+  printf '  %-28s %-8s %s\n' "HOST" "STATE" "FOLDER"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "# Written by"* | "# Each host"*) ;;
+      "# "*) folder="${line#\# }" ;;
+      "Host "*)
+        state=stopped
+        [[ "$running" == *$'\n'"${folder}"$'\n'* ]] && state=running
+        printf '  %-28s %-8s %s\n' "${line#Host }" "$state" "$folder"
+        ;;
+    esac
+  done <"$managed"
+}
+
+# Runs until stopped: resync shortly after any container starts or stops.
+# Messages go to stderr, which the service's journal keeps.
+cmd_watch() {
+  load_state
+  echo "t3-dev: watching container starts and stops" >&2
+  "$INSTALL_PATH" sync >&2 || echo "t3-dev: sync failed; will retry on the next container event" >&2
+  # Only the arrival of an event matters, not its content. .Action is used
+  # because it exists in every Docker version; the older top-level .ID field
+  # was removed and makes `docker events` exit with a template error.
+  # docker's own error output is left on stderr so it reaches the journal.
+  # When docker exits, the loop ends and the service restarts.
+  while read -r _; do
+    # A dev container start is a burst of events; let it settle, then drain
+    # whatever else arrived so one burst means one sync.
+    sleep 3
+    while read -r -t 1 _; do :; done
+    "$INSTALL_PATH" sync >&2 || echo "t3-dev: sync failed; will retry on the next container event" >&2
+  done < <("$T3_DEV_DOCKER" events --filter type=container --filter event=start --filter event=die --format '{{.Action}}')
+  fail "docker events ended; is the Docker daemon running? The service will restart"
+}
+
+# Called by ssh through ProxyCommand as: connect <host name> <encoded folder>.
+# stdin/stdout carry the SSH protocol, so nothing may be printed to stdout.
+cmd_connect() {
+  load_state
+  local name="${1:-}" wanted id folder found=""
+  [ -n "${2:-}" ] || fail "connect needs a host name and a folder"
+  wanted="$(decode_folder "$2")" || fail "could not decode the folder for ${name}"
+  [ -n "$wanted" ] || fail "could not decode the folder for ${name}"
+  while IFS=$'\t' read -r id folder; do
+    if [ "$folder" = "$wanted" ]; then
+      found="$id"
+      break
+    fi
+  done < <(running_dev_containers)
+  [ -n "$found" ] || fail "${name}: the dev container for ${wanted} is not running. Start it, then try again"
+  # Outside the loop on purpose: inside it, stdin is the container list, not
+  # the SSH stream this command has to carry.
+  exec "$T3_DEV_DOCKER" exec -i -u root "$found" "$SESSION"
+}
+
+cmd_remove() {
+  local ssh_dir config
+  if [ -f "$STATE_FILE" ]; then
+    # shellcheck source=/dev/null
+    . "$STATE_FILE"
+    ssh_dir="$T3_DEV_SSH_DIR"
+  else
+    ssh_dir="$(windows_home)/.ssh"
+  fi
+  config="${ssh_dir}/config"
+
+  if command -v systemctl >/dev/null 2>&1 && [ -f "$UNIT_PATH" ]; then
+    systemctl --user disable --now "$UNIT_NAME" >/dev/null 2>&1 || true
+    rm -f "$UNIT_PATH"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+
+  rm -f "${ssh_dir}/${MANAGED_NAME}" "${ssh_dir}/${KNOWN_HOSTS_NAME}" "$STATE_FILE"
+  # Edit the config as it is now instead of restoring the backup, so anything
+  # written to it since setup is kept. Only the Include line goes, together
+  # with the blank line setup put after it.
+  if [ -f "$config" ]; then
+    # Lines are compared without a trailing CR but printed as they are, so a
+    # file with Windows line endings keeps them.
+    awk -v include="$INCLUDE_LINE" '
+      { bare = $0; sub(/\r$/, "", bare) }
+      bare == include { dropped = NR; next }
+      dropped && NR == dropped + 1 && bare == "" { next }
+      { print }
+    ' "$config" >"${config}.tmp"
+    if [ -s "${config}.tmp" ]; then
+      mv "${config}.tmp" "$config"
+    else
+      # setup created the file and nothing else was ever added to it.
+      rm -f "${config}.tmp" "$config"
+    fi
+  fi
+  echo "t3-dev: removed. Your SSH config keeps everything else that is in it now."
+  echo "  ${config}.before-t3, if present, is the copy taken at setup; delete it when you no longer want it."
+  echo "  ${INSTALL_PATH} is left in place; delete it to finish uninstalling."
+}
+
+case "${1:-}" in
+  setup) cmd_setup ;;
+  sync) cmd_sync ;;
+  list) cmd_list ;;
+  watch) cmd_watch ;;
+  remove) cmd_remove ;;
+  connect)
+    shift
+    cmd_connect "$@"
+    ;;
+  -h | --help | help | "")
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

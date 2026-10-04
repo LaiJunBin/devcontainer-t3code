@@ -1,0 +1,52 @@
+{
+  "id": "t3-server",
+  "version": "0.3.0",
+  "name": "T3 Code server",
+  "description": "Installs a pinned, hash-verified T3 Code server, starts it with the container, and lets a T3 Code client reach it over SSH through `docker exec`, so the dev container becomes a T3 Code environment without publishing any port.",
+  "documentationURL": "https://github.com/pingdotgg/t3code",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "0.0.45",
+      "proposals": [
+        "0.0.45"
+      ],
+      "description": "T3 Code release to install. Only versions whose archive hash is pinned in this feature are accepted."
+    },
+    "autostart": {
+      "type": "boolean",
+      "default": true,
+      "description": "Start the server in the background whenever the container starts."
+    },
+    "ssh": {
+      "type": "boolean",
+      "default": true,
+      "description": "Install an SSH server that is only reachable through `docker exec` (no daemon, no port), for T3 Code's SSH connection mode. Makes the remote user's password empty."
+    },
+    "host": {
+      "type": "string",
+      "enum": [
+        "127.0.0.1",
+        "0.0.0.0"
+      ],
+      "default": "127.0.0.1",
+      "description": "Address the server listens on inside the container. Use 0.0.0.0 only when publishing the port instead of connecting over SSH."
+    },
+    "strict": {
+      "type": "boolean",
+      "default": true,
+      "description": "Fail the build when the image cannot run the feature. Set to false to skip the feature instead, for example when it is applied to every dev container through dev.containers.defaultFeatures."
+    }
+  },
+  "mounts": [
+    {
+      "source": "t3-server-${devcontainerId}",
+      "target": "/var/lib/t3-server",
+      "type": "volume"
+    }
+  ],
+  "entrypoint": "/usr/local/share/t3-server/entrypoint.sh",
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/common-utils"
+  ]
+}

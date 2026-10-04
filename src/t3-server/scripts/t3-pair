@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Mints a one-time pairing link for the T3 Code server in this container and
+# rewrites it to the address the client on the host can actually reach.
+set -euo pipefail
+
+CONFIG="${T3_SERVER_CONFIG:-/usr/local/share/t3-server/config}"
+# shellcheck source=/dev/null
+. "$CONFIG"
+
+DATA_DIR="$T3_SERVER_DATA_DIR"
+ORIGIN_FILE="${DATA_DIR}/pair-origin"
+
+usage() {
+  cat <<EOF
+Usage: t3-pair [HOST_PORT | ORIGIN]
+
+  HOST_PORT  the port this container's server is published on, e.g. 38101
+             (becomes http://127.0.0.1:38101)
+  ORIGIN     a full origin, e.g. https://dev-box.tailnet.ts.net
+
+The value is remembered, so later runs can omit it. The container cannot see
+which host port it is published on; that is why it has to be given once.
+EOF
+}
+
+fail() {
+  echo "t3-pair: $1" >&2
+  exit 1
+}
+
+case "${1:-}" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+esac
+
+if [ "$(id -un)" != "$T3_SERVER_USER" ]; then
+  [ "$(id -u)" -eq 0 ] || fail "run this as '${T3_SERVER_USER}' (current user: $(id -un))"
+  command -v runuser >/dev/null 2>&1 || fail "cannot switch to '${T3_SERVER_USER}': runuser is not available"
+  exec runuser -u "$T3_SERVER_USER" -- env "HOME=${T3_SERVER_USER_HOME}" "USER=${T3_SERVER_USER}" \
+    "LOGNAME=${T3_SERVER_USER}" "$0" "$@"
+fi
+
+origin=""
+if [ $# -ge 1 ]; then
+  if [[ "$1" =~ ^[0-9]{2,5}$ ]]; then
+    origin="http://127.0.0.1:$1"
+  elif [[ "$1" =~ ^https?://[A-Za-z0-9._:-]+$ ]]; then
+    origin="$1"
+  else
+    fail "expected a port such as 38101 or an origin such as http://127.0.0.1:38101, got '$1'"
+  fi
+  (umask 077 && printf '%s\n' "$origin" >"$ORIGIN_FILE")
+elif [ -f "$ORIGIN_FILE" ]; then
+  origin="$(cat "$ORIGIN_FILE")"
+fi
+
+t3-server status >/dev/null 2>&1 || fail "the server is not running or not ready; try 't3-server start'"
+
+output="$(T3CODE_HOME="${T3_SERVER_USER_HOME}/.t3" /usr/local/bin/t3 pair --label "client-$(date +%m%d-%H%M)" 2>&1)" || {
+  echo "$output" >&2
+  fail "'t3 pair' failed"
+}
+url="$(printf '%s\n' "$output" | sed -n 's/^Pairing URL: //p' | head -n 1)"
+token="$(printf '%s\n' "$output" | sed -n 's/^Token: //p' | head -n 1)"
+[ -n "$url" ] || {
+  echo "$output" >&2
+  fail "could not find the pairing URL in the output above"
+}
+
+echo
+echo "Environment: $(hostname)"
+if [ -z "$origin" ]; then
+  cat <<EOF
+Pairing link as seen from inside the container (valid 5 minutes, single use):
+
+  ${url}
+
+The host part is the container's own address. Run 't3-pair HOST_PORT' with the
+port this container is published on to get a link the client can open.
+EOF
+else
+  rewritten="$(printf '%s' "$url" | sed -E "s#^https?://[^/?\#]+#${origin}#")"
+  cat <<EOF
+Pairing link (valid 5 minutes, single use):
+
+  ${rewritten}
+
+If the client asks for the parts separately: host ${origin}, code ${token}
+EOF
+fi
+echo
