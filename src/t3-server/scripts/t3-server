@@ -149,30 +149,37 @@ cmd_start() {
   [ "${1:-}" = "--no-wait" ] && wait_for_ready=false
 
   if pid="$(server_pid)"; then
-    echo "t3-server: already running, pid ${pid}"
-    return 0
-  fi
-  cmd_prepare
+    # The entrypoint starts the server without waiting, so "running" can mean
+    # "launched a moment ago". A caller who asked to wait gets a server that
+    # answers, not just a process that exists.
+    if ! "$wait_for_ready" || is_ready; then
+      echo "t3-server: already running, pid ${pid}"
+      return 0
+    fi
+    echo "t3-server: already starting, pid ${pid}; waiting for it to answer"
+  else
+    cmd_prepare
 
-  umask 077
-  [ -f "$LOG_FILE" ] && mv -f "$LOG_FILE" "${LOG_FILE}.1"
-  # Started from / because the server only serves diffs for directories under
-  # the one it was launched in. setsid detaches it from the caller's session.
-  (
-    cd /
-    export PATH="${HOME}/.local/bin:${PATH}"
-    export T3CODE_HOME="$T3_HOME"
-    export T3CODE_HOST="${T3CODE_HOST:-$T3_SERVER_HOST}"
-    export T3CODE_PORT="$PORT"
-    export T3CODE_NO_BROWSER=1
-    export T3CODE_TELEMETRY_ENABLED="${T3CODE_TELEMETRY_ENABLED:-false}"
-    exec setsid nohup /usr/local/bin/t3 serve >"$LOG_FILE" 2>&1 </dev/null
-  ) &
-  echo "$!" >"$PID_FILE"
+    umask 077
+    [ -f "$LOG_FILE" ] && mv -f "$LOG_FILE" "${LOG_FILE}.1"
+    # Started from / because the server only serves diffs for directories under
+    # the one it was launched in. setsid detaches it from the caller's session.
+    (
+      cd /
+      export PATH="${HOME}/.local/bin:${PATH}"
+      export T3CODE_HOME="$T3_HOME"
+      export T3CODE_HOST="${T3CODE_HOST:-$T3_SERVER_HOST}"
+      export T3CODE_PORT="$PORT"
+      export T3CODE_NO_BROWSER=1
+      export T3CODE_TELEMETRY_ENABLED="${T3CODE_TELEMETRY_ENABLED:-false}"
+      exec setsid nohup /usr/local/bin/t3 serve >"$LOG_FILE" 2>&1 </dev/null
+    ) &
+    echo "$!" >"$PID_FILE"
 
-  if ! "$wait_for_ready"; then
-    echo "t3-server: starting, pid $(cat "$PID_FILE")"
-    return 0
+    if ! "$wait_for_ready"; then
+      echo "t3-server: starting, pid $(cat "$PID_FILE")"
+      return 0
+    fi
   fi
   local elapsed=0
   while [ "$elapsed" -lt "$READY_TIMEOUT_SECONDS" ]; do
