@@ -10,7 +10,7 @@ set -euo pipefail
 
 # This tool's own version, independent of the feature's. Bump it when this
 # file changes; the Release workflow publishes it as t3-dev-v<version>.
-T3_DEV_VERSION=0.3.4
+T3_DEV_VERSION=0.4.0
 T3_DEV_REPO=laijunbin/devcontainer-t3code
 
 MANAGED_NAME=t3-containers.conf
@@ -30,7 +30,7 @@ Usage: t3-dev <command>
   setup     one-time: install this tool, hook it into Windows' SSH config, and
             keep the host list in sync automatically where systemd is available
   sync      write the running dev containers that have the feature as SSH hosts
-  list      show the SSH hosts written by the last sync
+  list      show the hosts of running dev containers; -a adds stopped ones
   watch     sync whenever a container starts or stops (what the service runs)
   remove    undo setup
   update    replace this tool with the latest release, after asking (--yes
@@ -114,6 +114,36 @@ running_dev_containers() {
   done < <("$T3_DEV_DOCKER" ps --format '{{.ID}}\t{{.Label "devcontainer.local_folder"}}')
 }
 
+# Prints "<container id>\t<state>\t<folder>" for every dev container that
+# exists, stopped ones included. The state is docker's: running, exited, ...
+all_dev_containers() {
+  local id state folder
+  while IFS=$'\t' read -r id state folder; do
+    [ -n "$folder" ] || continue
+    printf '%s\t%s\t%s\n' "$id" "$state" "$(normalize_folder "$folder")"
+  done < <("$T3_DEV_DOCKER" ps -a --format '{{.ID}}\t{{.State}}\t{{.Label "devcontainer.local_folder"}}')
+}
+
+# Succeeds when a workspace folder is known to be gone. A folder on a Windows
+# drive (c:\...) is looked for under /mnt/<drive>, where WSL mounts drives by
+# default; where that is not a mount the folder cannot be checked from here
+# and counts as still there. It has to be a mount, not just a directory: an
+# unmounted drive must not make every project on it look deleted.
+# T3_DEV_DRIVE_ROOT replaces /mnt for tests.
+folder_is_gone() {
+  local folder="$1" path="$1"
+  if [[ "$folder" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
+    local drive="${BASH_REMATCH[1],,}" rest="${BASH_REMATCH[2]//\\//}"
+    path=""
+    if [ -n "${T3_DEV_DRIVE_ROOT:-}" ]; then
+      [ -d "${T3_DEV_DRIVE_ROOT}/${drive}" ] && path="${T3_DEV_DRIVE_ROOT}/${drive}/${rest}"
+    elif mountpoint -q "/mnt/${drive}" 2>/dev/null; then
+      path="/mnt/${drive}/${rest}"
+    fi
+  fi
+  [[ "$path" == /* ]] && [ ! -d "$path" ]
+}
+
 # The user-level systemd manager is what keeps the watcher running. Without it
 # (older WSL, systemd disabled) the tool still works with a manual 'sync'.
 have_user_systemd() {
@@ -191,6 +221,10 @@ cmd_sync() {
     fail "the Include line is missing from ${ssh_dir}/config; run 't3-dev setup' again"
   fi
 
+  # Without an answer from docker every container would look deleted and its
+  # host would be dropped.
+  "$T3_DEV_DOCKER" ps -q >/dev/null 2>&1 || fail "docker is not answering; the host list was left as it is"
+
   local tmp seen=" " seen_folders=$'\n'
   tmp="$(mktemp)"
   {
@@ -201,9 +235,11 @@ cmd_sync() {
   # T3 Code remembers an environment by its SSH host, so a folder's host must
   # not change under it: not when the project's label changes, and not when
   # another project with the same folder name starts or stops. The hosts the
-  # previous sync gave out are therefore kept, per folder.
+  # previous sync gave out are therefore kept, per folder. A folder whose
+  # container was removed has no Host entry but keeps its name in a
+  # "#reserved <host> <folder>" line, so a rebuild gets the same host back.
   local -A previous_host=()
-  local taken=" " line previous_folder=""
+  local taken=" " line previous_folder="" reserved
   if [ -f "$managed" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in
@@ -215,9 +251,20 @@ cmd_sync() {
             taken="${taken}${line#Host } "
           fi
           ;;
+        "#reserved "*)
+          reserved="${line#\#reserved }"
+          previous_host["${reserved#* }"]="${reserved%% *}"
+          taken="${taken}${reserved%% *} "
+          ;;
       esac
     done <"$managed"
   fi
+
+  # Folders that still have a container, running or not.
+  local existing_folders=$'\n' state
+  while IFS=$'\t' read -r id state folder; do
+    existing_folders="${existing_folders}${folder}"$'\n'
+  done < <(all_dev_containers)
 
   while IFS=$'\t' read -r id folder; do
     # One host per folder. 'connect' finds the container by folder, so a
@@ -274,10 +321,11 @@ EOF
   done < <(running_dev_containers)
 
   # A stopped container keeps its entry: connecting to it reports that it is
-  # not running, which is more useful than the host vanishing from the list.
+  # not running, which is more useful than the host vanishing. A container
+  # that was removed loses its entry and keeps only its reserved name.
   if [ -f "$managed" ]; then
     local kept
-    kept="$(carry_over_stopped "$managed" "$seen" "$seen_folders")"
+    kept="$(carry_over_stopped "$managed" "$seen" "$seen_folders" "$existing_folders")"
     if [ -n "$kept" ]; then
       printf '%s\n' "$kept" >>"$tmp"
     fi
@@ -300,18 +348,18 @@ EOF
   fi
 }
 
-# Prints the entries of the previous host file ($1) that are not among the
-# names just written ($2, space-separated) and whose workspace folder still
-# exists: a stopped container stays listed, a deleted project does not. An
-# entry for a folder that was just written ($3, one per line) is dropped too:
-# its container is running under a new name because its label changed.
+# Prints what to keep from the previous host file ($1) for folders that were
+# not just written ($3, one per line; $2 holds the names just given out):
+# the whole entry while the folder still has a container ($4, one per line),
+# otherwise only the reserved name while the folder itself exists.
 carry_over_stopped() {
-  local file="$1" seen="$2" seen_folders="$3" line folder="" name="" block=""
+  local file="$1" seen="$2" seen_folders="$3" existing_folders="$4"
+  local line folder="" name="" block="" reserved
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "# Written by"* | "# Each host"*) ;;
       "# "*)
-        emit_carried_block "$name" "$folder" "$block" "$seen" "$seen_folders"
+        emit_carried "$name" "$folder" "$block" "$seen" "$seen_folders" "$existing_folders"
         folder="${line#\# }"
         name=""
         block="$line"
@@ -326,54 +374,58 @@ carry_over_stopped() {
       "    "*)
         [ -n "$block" ] && block+=$'\n'"$line"
         ;;
+      "#reserved "*)
+        emit_carried "$name" "$folder" "$block" "$seen" "$seen_folders" "$existing_folders"
+        name=""
+        folder=""
+        block=""
+        reserved="${line#\#reserved }"
+        emit_carried "${reserved%% *}" "${reserved#* }" "" "$seen" "$seen_folders" "$existing_folders"
+        ;;
     esac
   done <"$file"
-  emit_carried_block "$name" "$folder" "$block" "$seen" "$seen_folders"
+  emit_carried "$name" "$folder" "$block" "$seen" "$seen_folders" "$existing_folders"
 }
 
-emit_carried_block() {
-  local name="$1" folder="$2" block="$3" seen="$4" seen_folders="$5"
-  [ -n "$name" ] || return 0
+# One entry of the previous file: name, folder, and its Host block, which is
+# empty for a name that was only reserved.
+emit_carried() {
+  local name="$1" folder="$2" block="$3" seen="$4" seen_folders="$5" existing_folders="$6"
+  [ -n "$name" ] && [ -n "$folder" ] || return 0
   [[ "$seen" == *" ${name} "* ]] && return 0
   [[ "$seen_folders" == *$'\n'"${folder}"$'\n'* ]] && return 0
-  # A folder on a Windows drive (c:\...) is looked for under /mnt/<drive>,
-  # where WSL mounts drives by default. Where that mount does not exist the
-  # folder cannot be checked from here and the entry is kept. It has to be a
-  # mount, not just a directory: an unmounted drive must not make every
-  # project on it look deleted. T3_DEV_DRIVE_ROOT replaces /mnt for tests.
-  local path="$folder"
-  if [[ "$folder" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
-    local drive="${BASH_REMATCH[1],,}" rest="${BASH_REMATCH[2]//\\//}"
-    path=""
-    if [ -n "${T3_DEV_DRIVE_ROOT:-}" ]; then
-      [ -d "${T3_DEV_DRIVE_ROOT}/${drive}" ] && path="${T3_DEV_DRIVE_ROOT}/${drive}/${rest}"
-    elif mountpoint -q "/mnt/${drive}" 2>/dev/null; then
-      path="/mnt/${drive}/${rest}"
-    fi
+  if [ -n "$block" ] && [[ "$existing_folders" == *$'\n'"${folder}"$'\n'* ]]; then
+    printf '\n%s\n' "$block"
+  elif ! folder_is_gone "$folder"; then
+    printf '\n#reserved %s %s\n' "$name" "$folder"
   fi
-  if [[ "$path" == /* ]] && [ ! -d "$path" ]; then
-    return 0
-  fi
-  printf '\n%s\n' "$block"
 }
 
 cmd_list() {
+  local all=false
+  case "${1:-}" in
+    -a | --all) all=true ;;
+    "") ;;
+    *) fail "unknown option for list: $1" ;;
+  esac
   load_state
   local managed="${T3_DEV_SSH_DIR}/${MANAGED_NAME}"
   [ -f "$managed" ] || fail "nothing synced yet; run 't3-dev sync'"
 
-  # Hosts of stopped containers stay in the file, so say which ones are up,
-  # and as which container: that is the ID other Docker commands want.
-  local -A container_of=()
-  local id folder
-  while IFS=$'\t' read -r id folder; do
+  # The file is as of the last sync; states and container IDs are asked for
+  # now. A folder with several containers shows the running one.
+  local -A container_of=() state_of=()
+  local id state folder
+  while IFS=$'\t' read -r id state folder; do
+    [ "${state_of["$folder"]:-}" = running ] && continue
     container_of["$folder"]="$id"
-  done < <(running_dev_containers 2>/dev/null)
+    state_of["$folder"]="$state"
+  done < <(all_dev_containers 2>/dev/null)
 
   # T3 CODE NAME is what the environment is called in T3 Code once added. It
   # equals the host unless T3_SERVER_LABEL is set or two projects share a
   # folder name; the "Add environment" picker shows the host.
-  local line state shown="" host
+  local line shown="" host rows=0 hidden=0
   local -A shown_count=()
   folder=""
   printf '  %-28s %-24s %-8s %-13s %s\n' "HOST" "T3 CODE NAME" "STATE" "CONTAINER" "FOLDER"
@@ -388,13 +440,28 @@ cmd_list() {
       "Host "*)
         host="${line#Host }"
         id="${container_of["$folder"]:-}"
+        # Removed since the last sync; the next one drops the entry.
+        [ -n "$id" ] || continue
         state=stopped
-        [ -n "$id" ] && state=running
-        printf '  %-28s %-24s %-8s %-13s %s\n' "$host" "${shown:-$host}" "$state" "${id:--}" "$folder"
+        [ "${state_of["$folder"]}" = running ] && state=running
+        if [ "$state" = stopped ] && ! "$all"; then
+          hidden=$((hidden + 1))
+          continue
+        fi
+        printf '  %-28s %-24s %-8s %-13s %s\n' "$host" "${shown:-$host}" "$state" "$id" "$folder"
         shown_count["${shown:-$host}"]=$((${shown_count["${shown:-$host}"]:-0} + 1))
+        rows=$((rows + 1))
         ;;
     esac
   done <"$managed"
+
+  if [ "$rows" -eq 0 ]; then
+    echo "  (none)"
+  fi
+  if [ "$hidden" -gt 0 ]; then
+    echo
+    echo "  ${hidden} stopped; 't3-dev list -a' shows them too."
+  fi
 
   # The server names the environment and cannot know about other projects, so
   # two projects with the same folder name look alike in T3 Code.
@@ -407,11 +474,12 @@ cmd_list() {
   done
 }
 
-# Runs until stopped: resync shortly after any container starts or stops.
+# Runs until stopped: resync shortly after any container starts, stops or is
+# removed.
 # Messages go to stderr, which the service's journal keeps.
 cmd_watch() {
   load_state
-  echo "t3-dev: watching container starts and stops" >&2
+  echo "t3-dev: watching containers start, stop and get removed" >&2
   "$INSTALL_PATH" sync >&2 || echo "t3-dev: sync failed; will retry on the next container event" >&2
   # Only the arrival of an event matters, not its content. .Action is used
   # because it exists in every Docker version; the older top-level .ID field
@@ -424,7 +492,7 @@ cmd_watch() {
     sleep 3
     while read -r -t 1 _; do :; done
     "$INSTALL_PATH" sync >&2 || echo "t3-dev: sync failed; will retry on the next container event" >&2
-  done < <("$T3_DEV_DOCKER" events --filter type=container --filter event=start --filter event=die --format '{{.Action}}')
+  done < <("$T3_DEV_DOCKER" events --filter type=container --filter event=start --filter event=die --filter event=destroy --format '{{.Action}}')
   fail "docker events ended; is the Docker daemon running? The service will restart"
 }
 
@@ -587,7 +655,10 @@ case "${1:-}" in
     cmd_update "$@"
     ;;
   sync) cmd_sync ;;
-  list) cmd_list ;;
+  list)
+    shift
+    cmd_list "$@"
+    ;;
   watch) cmd_watch ;;
   remove) cmd_remove ;;
   version | --version | -V) echo "t3-dev ${T3_DEV_VERSION}" ;;

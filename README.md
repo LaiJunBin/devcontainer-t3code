@@ -45,9 +45,9 @@ Options, compatibility, other setups, troubleshooting and security notes are in 
 | Command         | Does                                                                                                   |
 | --------------- | ------------------------------------------------------------------------------------------------------ |
 | `t3-dev setup`  | Copies itself to `~/.local/bin`, adds one `Include` line to the Windows user's `.ssh/config` (a copy of the file as it was is kept once, as `config.before-t3`), and installs a user-level systemd service that runs `t3-dev watch`. |
-| `t3-dev sync`   | Writes one SSH host per running dev container that has the feature, into a file it owns next to that config. Hosts of stopped containers stay listed while their folder exists. |
-| `t3-dev watch`  | Runs `sync` whenever a container starts or stops. This is what the service runs.                       |
-| `t3-dev list`   | Shows each host, the name T3 Code shows for it once added, whether its container is running, and its container ID. The two names are the same unless `T3_SERVER_LABEL` is set or two projects share a folder name. |
+| `t3-dev sync`   | Writes one SSH host per dev container that has the feature, into a file it owns next to that config. A stopped container keeps its host; a removed one loses it. |
+| `t3-dev watch`  | Runs `sync` whenever a container starts, stops or is removed. This is what the service runs.            |
+| `t3-dev list`   | Shows the hosts of running containers: the host, the name T3 Code shows for it once added, and the container ID. `-a` adds stopped containers. The two names are the same unless `T3_SERVER_LABEL` is set or two projects share a folder name. |
 | `t3-dev version` | Prints the tool's version. It is numbered separately from the feature; see [Versions](#versions).   |
 | `t3-dev update` | Downloads `t3-dev` from the latest release, checks it (see below), shows the old and new version, and replaces itself after you confirm; `--yes` skips the question. Then reruns `setup`. |
 | `t3-dev remove` | Stops the service and takes the `Include` line and its own files out again.                            |
@@ -60,7 +60,7 @@ Containers are matched by workspace folder, in either the form VS Code records f
 
 Each SSH host is named `t3-<project folder>`, lowercased, with anything outside `a-z`, `0-9` and `-` turned into `-`. That is also what the feature calls the environment by default, so the host you pick in **Add environment** is the name T3 Code then shows. Setting `T3_SERVER_LABEL` changes the name in T3 Code only; the host stays, and with it the environment T3 Code has saved.
 
-A folder keeps the host it was given. Two projects with the same folder name get `t3-<folder>` and `t3-<folder>-2` in the order they were first seen, and neither changes when the other stops or starts. Both are still called `t3-<folder>` in T3 Code, because each server names itself without knowing about the other; `t3-dev list` points this out, and a `T3_SERVER_LABEL` in one of them tells them apart there.
+A folder keeps the host it was given. Two projects with the same folder name get `t3-<folder>` and `t3-<folder>-2` in the order they were first seen, and neither changes when the other stops or starts. Removing a container, as a rebuild does, takes its host off the list but not away from the folder: the name stays reserved while the folder exists, and the next container of that folder gets it back. Both projects are still called `t3-<folder>` in T3 Code, because each server names itself without knowing about the other; `t3-dev list` points this out, and a `T3_SERVER_LABEL` in one of them tells them apart there.
 
 ### Verifying a download
 
