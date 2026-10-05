@@ -45,7 +45,7 @@ Options, compatibility, other setups, troubleshooting and security notes are in 
 | `t3-dev setup`  | Copies itself to `~/.local/bin`, adds one `Include` line to the Windows user's `.ssh/config` (a copy of the file as it was is kept once, as `config.before-t3`), and installs a user-level systemd service that runs `t3-dev watch`. |
 | `t3-dev sync`   | Writes one SSH host per running dev container that has the feature, into a file it owns next to that config. Hosts of stopped containers stay listed while their folder exists. |
 | `t3-dev watch`  | Runs `sync` whenever a container starts or stops. This is what the service runs.                       |
-| `t3-dev list`   | Shows each host, the name T3 Code shows for it, whether its container is running, and its container ID. The two names are the same unless `T3_SERVER_LABEL` is set or two projects share a folder name. |
+| `t3-dev list`   | Shows each host, the name T3 Code shows for it once added, whether its container is running, and its container ID. The two names are the same unless `T3_SERVER_LABEL` is set or two projects share a folder name. |
 | `t3-dev version` | Prints the tool's version. It is numbered separately from the feature; see [Versions](#versions).   |
 | `t3-dev update` | Downloads `t3-dev` from the latest release, checks it (see below), shows the old and new version, and replaces itself after you confirm; `--yes` skips the question. Then reruns `setup`. |
 | `t3-dev remove` | Stops the service and takes the `Include` line and its own files out again.                            |
@@ -56,7 +56,9 @@ Without user-level systemd in the WSL distro, `setup` says so and you run `t3-de
 
 Containers are matched by workspace folder, in either the form VS Code records for WSL folders or the plain Linux form.
 
-Each SSH host is named after the label its container reports, `t3-<project folder>` by default, which is also the name T3 Code shows for the environment once it is added. A custom `T3_SERVER_LABEL` is lowercased and reduced to `a-z`, `0-9` and `-` for the host name and kept inside the `t3-` prefix, so in that case the two differ in form. Two projects with the same folder name get the same label; the second host gets a `-2` suffix, and giving one of them a `T3_SERVER_LABEL` tells them apart in T3 Code as well.
+Each SSH host is named `t3-<project folder>`, lowercased, with anything outside `a-z`, `0-9` and `-` turned into `-`. That is also what the feature calls the environment by default, so the host you pick in **Add environment** is the name T3 Code then shows. Setting `T3_SERVER_LABEL` changes the name in T3 Code only; the host stays, and with it the environment T3 Code has saved.
+
+A folder keeps the host it was given. Two projects with the same folder name get `t3-<folder>` and `t3-<folder>-2` in the order they were first seen, and neither changes when the other stops or starts. Both are still called `t3-<folder>` in T3 Code, because each server names itself without knowing about the other; `t3-dev list` points this out, and a `T3_SERVER_LABEL` in one of them tells them apart there.
 
 ### Verifying a download
 
@@ -85,7 +87,7 @@ The feature and `t3-dev` are versioned and released separately, because updating
 | Feature   | `src/t3-server/devcontainer-feature.json` | `ghcr.io/laijunbin/devcontainer-t3code/t3-server:<version>`, git tag `feature_t3-server_<version>` | rebuilding the dev container, which downloads the server (about 70 MB) again |
 | `t3-dev`  | `T3_DEV_VERSION` in `host/t3-dev`         | GitHub release and git tag `t3-dev-v<version>`                               | `t3-dev update`, a few seconds                             |
 
-Any `t3-dev` works with any feature version; neither has to be updated because the other was. One thing depends on the feature's version: from feature 0.3.1 on, the SSH host and the name shown in T3 Code agree. With an older feature in a container, `t3-dev` names the host after the folder and T3 Code shows the container ID.
+Any `t3-dev` works with any feature version; neither has to be updated because the other was. One thing depends on the feature's version: from feature 0.3.1 on, the environment is called `t3-<folder>` in T3 Code, like its host. With an older feature in a container, T3 Code shows the container ID, and so does `t3-dev list`.
 
 ## Support
 

@@ -10,7 +10,7 @@ set -euo pipefail
 
 # This tool's own version, independent of the feature's. Bump it when this
 # file changes; the Release workflow publishes it as t3-dev-v<version>.
-T3_DEV_VERSION=0.3.3
+T3_DEV_VERSION=0.3.4
 T3_DEV_REPO=laijunbin/devcontainer-t3code
 
 MANAGED_NAME=t3-containers.conf
@@ -198,35 +198,64 @@ cmd_sync() {
     echo "# Each host is a dev container in WSL (${T3_DEV_DISTRO}), reached over 'docker exec'."
   } >"$tmp"
 
+  # T3 Code remembers an environment by its SSH host, so a folder's host must
+  # not change under it: not when the project's label changes, and not when
+  # another project with the same folder name starts or stops. The hosts the
+  # previous sync gave out are therefore kept, per folder.
+  local -A previous_host=()
+  local taken=" " line previous_folder=""
+  if [ -f "$managed" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "# Written by"* | "# Each host"*) ;;
+        "# "*) previous_folder="${line#\# }" ;;
+        "Host "*)
+          if [ -n "$previous_folder" ]; then
+            previous_host["$previous_folder"]="${line#Host }"
+            taken="${taken}${line#Host } "
+          fi
+          ;;
+      esac
+    done <"$managed"
+  fi
+
   while IFS=$'\t' read -r id folder; do
+    # One host per folder. 'connect' finds the container by folder, so a
+    # second container of the same folder could not be reached separately.
+    [[ "$seen_folders" == *$'\n'"${folder}"$'\n'* ]] && continue
     "$T3_DEV_DOCKER" exec "$id" test -x "$SESSION" </dev/null 2>/dev/null || continue
     user="$("$T3_DEV_DOCKER" exec "$id" sh -c ". ${FEATURE_CONFIG} && printf %s \"\$T3_SERVER_USER\"" </dev/null 2>/dev/null)" || continue
     [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]] || continue
 
-    # The host is named after the label the environment shows in T3 Code, so
-    # the two match. Feature versions without 'label' fall back to the folder
-    # name, built the same way the feature builds its default label.
-    base="$("$T3_DEV_DOCKER" exec "$id" t3-server label </dev/null 2>/dev/null || true)"
-    # What T3 Code shows for the environment, kept next to the host so 'list'
-    # can show the two side by side when a custom label makes them differ.
-    shown="$base"
-    if [ -z "$base" ]; then
-      base="${folder//\\//}"
-      base="t3-$(basename "$base")"
+    # The host is t3-<folder name>, built the way the feature builds its
+    # default label, so the two are the same unless T3_SERVER_LABEL is set.
+    base="${folder//\\//}"
+    base="t3-$(basename "$base" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-\n' '-')"
+    name="${previous_host["$folder"]:-}"
+    # A host from before that is not of this form (older versions named it
+    # after the label) is replaced.
+    if [[ ! "$name" =~ ^"$base"(-[0-9]+)?$ ]] || [[ "$seen" == *" ${name} "* ]]; then
+      name="$base"
+      local suffix=2
+      # Another folder's host is not reused even while its container is
+      # stopped: T3 Code may still have an environment saved under it.
+      while [[ "$seen" == *" ${name} "* ]] ||
+        { [[ "$taken" == *" ${name} "* ]] && [ "${previous_host["$folder"]:-}" != "$name" ]; }; do
+        name="${base}-${suffix}"
+        suffix=$((suffix + 1))
+      done
     fi
-    base="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
-    [ -n "$shown" ] || shown="$base"
-    # Always inside the t3- namespace: a custom label must not be able to
-    # shadow a real host such as github.com in the SSH config.
-    [[ "$base" == t3-* ]] || base="t3-${base}"
-    name="$base"
-    local suffix=2
-    while [[ "$seen" == *" ${name} "* ]]; do
-      name="${base}-${suffix}"
-      suffix=$((suffix + 1))
-    done
     seen="${seen}${name} "
     seen_folders="${seen_folders}${folder}"$'\n'
+
+    # What T3 Code shows for the environment once it is added, kept next to
+    # the host for 'list'. Feature versions without 'label' leave it at the
+    # container's hostname.
+    # It comes from the container and ends up on the terminal: no control
+    # characters.
+    shown="$("$T3_DEV_DOCKER" exec "$id" t3-server label </dev/null 2>/dev/null | head -n 1 | tr -d '[:cntrl:]' || true)"
+    [ -n "$shown" ] || shown="$("$T3_DEV_DOCKER" exec "$id" hostname </dev/null 2>/dev/null | head -n 1 | tr -d '[:cntrl:]' || true)"
+    [ -n "$shown" ] || shown="$name"
 
     cat >>"$tmp" <<EOF
 
@@ -307,8 +336,22 @@ emit_carried_block() {
   [ -n "$name" ] || return 0
   [[ "$seen" == *" ${name} "* ]] && return 0
   [[ "$seen_folders" == *$'\n'"${folder}"$'\n'* ]] && return 0
-  # Only Linux paths can be checked from here; others are kept.
-  if [[ "$folder" == /* ]] && [ ! -d "$folder" ]; then
+  # A folder on a Windows drive (c:\...) is looked for under /mnt/<drive>,
+  # where WSL mounts drives by default. Where that mount does not exist the
+  # folder cannot be checked from here and the entry is kept. It has to be a
+  # mount, not just a directory: an unmounted drive must not make every
+  # project on it look deleted. T3_DEV_DRIVE_ROOT replaces /mnt for tests.
+  local path="$folder"
+  if [[ "$folder" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
+    local drive="${BASH_REMATCH[1],,}" rest="${BASH_REMATCH[2]//\\//}"
+    path=""
+    if [ -n "${T3_DEV_DRIVE_ROOT:-}" ]; then
+      [ -d "${T3_DEV_DRIVE_ROOT}/${drive}" ] && path="${T3_DEV_DRIVE_ROOT}/${drive}/${rest}"
+    elif mountpoint -q "/mnt/${drive}" 2>/dev/null; then
+      path="/mnt/${drive}/${rest}"
+    fi
+  fi
+  if [[ "$path" == /* ]] && [ ! -d "$path" ]; then
     return 0
   fi
   printf '\n%s\n' "$block"
@@ -327,9 +370,11 @@ cmd_list() {
     container_of["$folder"]="$id"
   done < <(running_dev_containers 2>/dev/null)
 
-  # T3 CODE NAME is what the environment is called in T3 Code. It equals the
-  # host unless T3_SERVER_LABEL is set or two projects share a folder name.
+  # T3 CODE NAME is what the environment is called in T3 Code once added. It
+  # equals the host unless T3_SERVER_LABEL is set or two projects share a
+  # folder name; the "Add environment" picker shows the host.
   local line state shown="" host
+  local -A shown_count=()
   folder=""
   printf '  %-28s %-24s %-8s %-13s %s\n' "HOST" "T3 CODE NAME" "STATE" "CONTAINER" "FOLDER"
   while IFS= read -r line || [ -n "$line" ]; do
@@ -346,9 +391,20 @@ cmd_list() {
         state=stopped
         [ -n "$id" ] && state=running
         printf '  %-28s %-24s %-8s %-13s %s\n' "$host" "${shown:-$host}" "$state" "${id:--}" "$folder"
+        shown_count["${shown:-$host}"]=$((${shown_count["${shown:-$host}"]:-0} + 1))
         ;;
     esac
   done <"$managed"
+
+  # The server names the environment and cannot know about other projects, so
+  # two projects with the same folder name look alike in T3 Code.
+  for shown in "${!shown_count[@]}"; do
+    if [ "${shown_count["$shown"]}" -gt 1 ]; then
+      echo
+      echo "  ${shown_count["$shown"]} hosts are shown as '${shown}' in T3 Code. To tell them apart there, set"
+      echo "  \"containerEnv\": { \"T3_SERVER_LABEL\": \"<name>\" } in one project's devcontainer.json and rebuild it."
+    fi
+  done
 }
 
 # Runs until stopped: resync shortly after any container starts or stops.
