@@ -52,11 +52,13 @@ jobs:
           # A version that already has its tag is released. If its files have
           # changed since, the bump was forgotten: stop rather than skip it
           # silently or publish different content under a used number.
+          # Documentation next to the feature's files is not part of what it
+          # installs and does not call for a release.
           plan() { # <name> <tag> <path>
             if ! git rev-parse -q --verify "refs/tags/$2" >/dev/null; then
               echo "$1: $2 is new, releasing"
               echo "$1_new=true" >>"$GITHUB_OUTPUT"
-            elif git diff --quiet "$2" HEAD -- "$3"; then
+            elif git diff --quiet "$2" HEAD -- "$3" ":(exclude)$3/*.md"; then
               echo "$1: $2 is already released and unchanged, skipping"
               echo "$1_new=false" >>"$GITHUB_OUTPUT"
             else

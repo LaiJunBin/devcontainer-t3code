@@ -1,5 +1,7 @@
 # T3 Code server (`t3-server`)
 
+English | [繁體中文](README.zh-TW.md)
+
 Runs a [T3 Code](https://github.com/pingdotgg/t3code) server inside a dev container, so the T3 Code desktop app can use that container as an environment. Agents then work inside the container, with the isolation the container already gives the project.
 
 The container publishes no port. The desktop app reaches the server over SSH carried by `docker exec`, and reuses the server the feature already started.
@@ -60,7 +62,7 @@ They can be run as the server's user or as root; root drops to the server's user
 - **At image build:** downloads the release archive from the official GitHub release, checks it against a SHA-256 pinned in this feature, and installs it to `/opt/t3-server`. Nothing is downloaded when a container starts.
 - **Data:** threads, history and pairing state live in a named volume per dev container, mounted at `/var/lib/t3-server` with mode `0700`. `~/.t3` of the remote user links to it.
 - **Startup:** the feature's entrypoint starts the server in the background without delaying the container, from `/`, as the remote user, with product telemetry off, listening on loopback.
-- **Name:** T3 Code would show the container ID as the environment's name. The feature writes `t3-<folder>` instead, as `PRETTY_HOSTNAME` in `/etc/machine-info`, which T3 Code prefers. The folder is the one mounted at `/workspaces/<folder>`, lowercased, with every character outside `a-z`, `0-9` and `-` replaced by `-`. `t3-dev` names the SSH host after this same label, so the name you pick when adding the environment is the name it then shows. An existing `/etc/machine-info` that the feature did not write is left alone. `t3-server label` prints the name in use.
+- **Name:** T3 Code would show the container ID as the environment's name. The feature writes `t3-<folder>` instead, as `PRETTY_HOSTNAME` in `/etc/machine-info`, which T3 Code prefers. The folder is the one mounted at `/workspaces/<folder>`, lowercased, with every character outside `a-z`, `0-9` and `-` replaced by `-`. `t3-dev` names the SSH host from the folder in the same way, so the name you pick when adding the environment is the name it then shows. An existing `/etc/machine-info` that the feature did not write is left alone. `t3-server label` prints the name in use.
 - **SSH entry point:** `/usr/local/share/t3-server/ssh-session` serves one SSH session over stdin/stdout. No SSH daemon runs and no port is opened. Its host key is kept in the data volume, and it uses its own configuration file; the image's system SSH configuration is not changed.
 - **Reuse by the client:** T3 Code's SSH mode looks in `~/.t3` for a running server and for an installed runtime of its own version. It finds both, so it neither starts a second server nor downloads one.
 

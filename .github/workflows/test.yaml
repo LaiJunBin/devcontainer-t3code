@@ -1,9 +1,14 @@
 name: Test
 
+# Documentation is not built or run by anything here, so a change that only
+# touches it does not start the container builds. Run the workflow by hand to
+# test such a commit anyway.
 on:
   pull_request:
+    paths-ignore: ["**.md", "LICENSE"]
   push:
     branches: [main]
+    paths-ignore: ["**.md", "LICENSE"]
   workflow_dispatch:
 
 permissions:

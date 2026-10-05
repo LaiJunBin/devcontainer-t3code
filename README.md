@@ -1,5 +1,7 @@
 # devcontainer-t3code
 
+English | [繁體中文](README.zh-TW.md)
+
 Use a dev container as a [T3 Code](https://github.com/pingdotgg/t3code) environment: agents run inside the container, and the T3 Code desktop app drives them. The container publishes no port.
 
 Unofficial; not affiliated with or supported by the T3 Code maintainers.
@@ -106,12 +108,12 @@ Maintained on a best-effort basis. What is known to work is what the **Test** wo
 
 | Workflow    | Trigger                     | Does                                                                                                                      |
 | ----------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **Test**    | every push and pull request | `shellcheck`, then builds a container with the feature per image and architecture and runs `test/t3-server/test.sh` in it |
+| **Test**    | every push and pull request, except ones that only change documentation | `shellcheck`, then builds a container with the feature per image and architecture and runs `test/t3-server/test.sh` in it |
 | **Release** | manual, from `main` only    | for whichever of the two has a version without a tag yet: publishes the feature to `ghcr.io/<owner>/<repo>/<feature>` and tags it, and creates the GitHub release `t3-dev-v<version>` with `t3-dev`, its checksum and its attestation |
 
 Third-party actions are pinned to commit SHAs. Releasing is manual so that what is published only changes on purpose. Only the release's second job can write to the repository.
 
-To release, bump the version of the part that changed and run **Release**. A part whose version is already tagged is skipped, so releasing `t3-dev` alone does not make projects download the server again. If a part's files changed but its version did not, the workflow stops and says which one to bump, instead of skipping it or publishing new content under a used number.
+To release, bump the version of the part that changed and run **Release**. A part whose version is already tagged is skipped, so releasing `t3-dev` alone does not make projects download the server again. If a part's files changed but its version did not, the workflow stops and says which one to bump, instead of skipping it or publishing new content under a used number. A change to only the documentation in the feature's folder does not count.
 
 Turn on **Settings → General → Releases → Enable release immutability** in the repository. GitHub then locks each release's tag and files once it is published, so not even the owner's account can swap them later.
 
@@ -128,7 +130,7 @@ src/t3-server/
   scripts/t3-server           status / start / stop / restart / logs
   scripts/ssh-session         one SSH session over docker exec
   scripts/t3-pair             pairing link helper, for the published-port setup
-  README.md                   user documentation
+  README.md                   user documentation (README.zh-TW.md: Traditional Chinese)
 host/t3-dev                   host-side helper (WSL)
 test/t3-server/test.sh        checks run by `devcontainer features test`
 test/t3-server/scenarios.json other images and option sets to run them on
