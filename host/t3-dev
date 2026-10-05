@@ -10,7 +10,7 @@ set -euo pipefail
 
 # This tool's own version, independent of the feature's. Bump it when this
 # file changes; the Release workflow publishes it as t3-dev-v<version>.
-T3_DEV_VERSION=0.4.0
+T3_DEV_VERSION=0.4.1
 T3_DEV_REPO=laijunbin/devcontainer-t3code
 
 MANAGED_NAME=t3-containers.conf
@@ -22,6 +22,13 @@ UNIT_NAME=t3-dev-watch.service
 UNIT_PATH="${HOME}/.config/systemd/user/${UNIT_NAME}"
 SESSION=/usr/local/share/t3-server/ssh-session
 FEATURE_CONFIG=/usr/local/share/t3-server/config
+MACHINE_INFO=/etc/machine-info
+# The line the feature puts above a PRETTY_HOSTNAME it wrote. A file written
+# here carries it too, so the feature takes over again once it has a name of
+# its own, such as a T3_SERVER_LABEL set later.
+LABEL_MARKER="# PRETTY_HOSTNAME written by the t3-server dev container feature"
+# A server this young has no work running that a restart could interrupt.
+RESTART_WITHIN_SECONDS=120
 
 usage() {
   cat <<EOF
@@ -215,7 +222,7 @@ cmd_setup() {
 
 cmd_sync() {
   load_state
-  local ssh_dir="$T3_DEV_SSH_DIR" managed id folder user name base shown count=0
+  local ssh_dir="$T3_DEV_SSH_DIR" managed id folder user name base shown wanted count=0
   managed="${ssh_dir}/${MANAGED_NAME}"
   if ! grep -qxF "$INCLUDE_LINE" "${ssh_dir}/config" 2>/dev/null; then
     fail "the Include line is missing from ${ssh_dir}/config; run 't3-dev setup' again"
@@ -296,18 +303,22 @@ cmd_sync() {
     seen_folders="${seen_folders}${folder}"$'\n'
 
     # What T3 Code shows for the environment once it is added, kept next to
-    # the host for 'list'. Feature versions without 'label' leave it at the
-    # container's hostname.
-    # It comes from the container and ends up on the terminal: no control
-    # characters.
+    # the host for 'list'. It comes from the container and ends up on the
+    # terminal: no control characters.
     shown="$("$T3_DEV_DOCKER" exec "$id" t3-server label </dev/null 2>/dev/null | head -n 1 | tr -d '[:cntrl:]' || true)"
-    [ -n "$shown" ] || shown="$("$T3_DEV_DOCKER" exec "$id" hostname </dev/null 2>/dev/null | head -n 1 | tr -d '[:cntrl:]' || true)"
-    [ -n "$shown" ] || shown="$name"
+    wanted=""
+    if [ -z "$shown" ]; then
+      # The feature has no name for this one: the project is not mounted at
+      # /workspaces/<folder>, as with Docker Compose, or the feature is older
+      # than its 'label' command. The folder is known here, so name it.
+      name_environment "$id" "$name"
+    fi
 
     cat >>"$tmp" <<EOF
 
 # ${folder}
-#label ${shown}
+#label ${shown}${wanted:+
+#wanted ${wanted}}
 Host ${name}
     User ${user}
     ProxyCommand wsl.exe -d ${T3_DEV_DISTRO} -- ${INSTALL_PATH} connect ${name} $(encode_folder "$folder")
@@ -348,6 +359,63 @@ EOF
   fi
 }
 
+# Gives the environment in container $1 the name $2, for a container whose
+# feature found none. Sets 'shown' to what T3 Code gets now and 'wanted' to
+# the name when the running server does not use it yet.
+#
+# T3 Code takes the name from PRETTY_HOSTNAME in /etc/machine-info, read once
+# when the server starts. The feature's entrypoint starts the server before
+# anything here can run, so right after the file is written the server still
+# calls itself by the container's hostname and has to be restarted. That is
+# only done in a container that started moments ago, where nothing can be
+# running yet; an older one keeps its server and gets the name the next time
+# the container starts.
+name_environment() {
+  local id="$1" name="$2" current content served started age autostart
+  shown=""
+  wanted=""
+  content="${LABEL_MARKER}"$'\n'"PRETTY_HOSTNAME=\"${name}\""
+  current="$("$T3_DEV_DOCKER" exec "$id" cat "$MACHINE_INFO" </dev/null 2>/dev/null || true)"
+
+  # A machine-info that neither the feature nor this tool wrote is the
+  # image's own and stays.
+  if [ -n "$current" ] && ! grep -qxF "$LABEL_MARKER" <<<"$current"; then
+    shown="$(sed -n 's/^PRETTY_HOSTNAME="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' <<<"$current" | head -n 1 | tr -d '[:cntrl:]')"
+    [ -n "$shown" ] || shown="$(container_hostname "$id")"
+    return 0
+  fi
+
+  if [ "$current" != "$content" ]; then
+    if ! printf '%s\n' "$content" |
+      "$T3_DEV_DOCKER" exec -i -u root "$id" sh -c "cat >$MACHINE_INFO" 2>/dev/null; then
+      shown="$(container_hostname "$id")"
+      return 0
+    fi
+    started="$("$T3_DEV_DOCKER" inspect -f '{{.State.StartedAt}}' "$id" 2>/dev/null || true)"
+    age=$(($(date +%s) - $(date -d "$started" +%s 2>/dev/null || echo 0)))
+    autostart="$("$T3_DEV_DOCKER" exec "$id" sh -c ". ${FEATURE_CONFIG} && printf %s \"\${T3_SERVER_AUTOSTART:-true}\"" </dev/null 2>/dev/null || true)"
+    if [ "$age" -le "$RESTART_WITHIN_SECONDS" ] && [ "$autostart" = "true" ]; then
+      "$T3_DEV_DOCKER" exec -u root "$id" sh -c "t3-server stop; t3-server start --no-wait" </dev/null >/dev/null 2>&1 || true
+      shown="$name"
+      return 0
+    fi
+  fi
+
+  # Not restarted: say what the running server answers with, if it answers.
+  served="$("$T3_DEV_DOCKER" exec "$id" sh -c ". ${FEATURE_CONFIG} && url=\"http://127.0.0.1:\${T3CODE_PORT:-\$T3_SERVER_PORT}/.well-known/t3/environment\" && { curl -fsS --max-time 3 \"\$url\" 2>/dev/null || wget -qO- -T 3 \"\$url\" 2>/dev/null; }" </dev/null 2>/dev/null |
+    sed -n 's/.*"label":"\([^"]*\)".*/\1/p' | head -n 1 | tr -d '[:cntrl:]' || true)"
+  if [ -n "$served" ] && [ "$served" != "$name" ]; then
+    shown="$served"
+    wanted="$name"
+  else
+    shown="$name"
+  fi
+}
+
+container_hostname() {
+  "$T3_DEV_DOCKER" exec "$1" hostname </dev/null 2>/dev/null | head -n 1 | tr -d '[:cntrl:]' || true
+}
+
 # Prints what to keep from the previous host file ($1) for folders that were
 # not just written ($3, one per line; $2 holds the names just given out):
 # the whole entry while the folder still has a container ($4, one per line),
@@ -364,7 +432,7 @@ carry_over_stopped() {
         name=""
         block="$line"
         ;;
-      "#label "*)
+      "#label "* | "#wanted "*)
         [ -n "$block" ] && block+=$'\n'"$line"
         ;;
       "Host "*)
@@ -425,7 +493,8 @@ cmd_list() {
   # T3 CODE NAME is what the environment is called in T3 Code once added. It
   # equals the host unless T3_SERVER_LABEL is set or two projects share a
   # folder name; the "Add environment" picker shows the host.
-  local line shown="" host rows=0 hidden=0
+  local line shown="" wanted="" host rows=0 hidden=0
+  local -a pending=()
   local -A shown_count=()
   folder=""
   printf '  %-28s %-24s %-8s %-13s %s\n' "HOST" "T3 CODE NAME" "STATE" "CONTAINER" "FOLDER"
@@ -435,8 +504,10 @@ cmd_list() {
       "# "*)
         folder="${line#\# }"
         shown=""
+        wanted=""
         ;;
       "#label "*) shown="${line#\#label }" ;;
+      "#wanted "*) wanted="${line#\#wanted }" ;;
       "Host "*)
         host="${line#Host }"
         id="${container_of["$folder"]:-}"
@@ -451,6 +522,9 @@ cmd_list() {
         printf '  %-28s %-24s %-8s %-13s %s\n' "$host" "${shown:-$host}" "$state" "$id" "$folder"
         shown_count["${shown:-$host}"]=$((${shown_count["${shown:-$host}"]:-0} + 1))
         rows=$((rows + 1))
+        if [ -n "$wanted" ] && [ "$state" = running ]; then
+          pending+=("${host}: becomes '${wanted}' when its container next starts, or now with: docker exec ${id} t3-server restart")
+        fi
         ;;
     esac
   done <"$managed"
@@ -461,6 +535,15 @@ cmd_list() {
   if [ "$hidden" -gt 0 ]; then
     echo
     echo "  ${hidden} stopped; 't3-dev list -a' shows them too."
+  fi
+
+  # A name given by 'sync' to a server that was already busy: it was not
+  # restarted, since that would stop whatever its agents are doing.
+  if [ "${#pending[@]}" -gt 0 ]; then
+    echo
+    for line in "${pending[@]}"; do
+      echo "  ${line}"
+    done
   fi
 
   # The server names the environment and cannot know about other projects, so

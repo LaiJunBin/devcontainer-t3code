@@ -58,32 +58,18 @@ repair_data_owner() {
 # hostname, which in a container is the container ID. T3 Code reads
 # PRETTY_HOSTNAME from /etc/machine-info before the hostname, so a name built
 # from the project's folder goes there: t3-<folder>, lowercased, with anything
-# outside a-z, 0-9 and "-" turned into "-". t3-dev builds the SSH host from
-# the folder in the same way, so the name picked when adding the environment
-# is the name it then shows. T3_SERVER_LABEL (containerEnv) replaces the
-# default.
-#
-# The folder's name comes from the dev container tool: the feature declares
-# T3_SERVER_DEFAULT_LABEL as "t3-${localWorkspaceFolderBasename}", which the
-# tool fills in when it creates the container, wherever the project is
-# mounted. A tool that does not substitute it leaves the "${...}" in place;
-# then the name is read off the mount point, which only works for the usual
-# /workspaces/<folder>.
+# outside a-z, 0-9 and "-" turned into "-". t3-dev names the SSH host after
+# this same label, so the name picked when adding the environment is the name
+# it then shows. T3_SERVER_LABEL (containerEnv) replaces the default.
 MACHINE_INFO=/etc/machine-info
 LABEL_MARKER="# PRETTY_HOSTNAME written by the t3-server dev container feature"
 
 environment_label() {
   local label="${T3_SERVER_LABEL:-}"
   if [ -z "$label" ]; then
-    local folder="${T3_SERVER_DEFAULT_LABEL:-}"
-    # shellcheck disable=SC2016 # a literal ${ is what an unsubstituted value has
-    case "$folder" in
-      *'${'* | "") folder="" ;;
-      *) folder="${folder#t3-}" ;;
-    esac
-    if [ -z "$folder" ]; then
-      folder="$(awk '$5 ~ /^\/workspaces\/[^\/]+$/ { n = split($5, part, "/"); print part[n]; exit }' /proc/self/mountinfo 2>/dev/null || true)"
-    fi
+    # Dev container tools mount the project at /workspaces/<folder name>.
+    local folder
+    folder="$(awk '$5 ~ /^\/workspaces\/[^\/]+$/ { n = split($5, part, "/"); print part[n]; exit }' /proc/self/mountinfo 2>/dev/null || true)"
     if [ -n "$folder" ]; then
       label="t3-$(printf '%s' "$folder" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
     fi

@@ -45,7 +45,7 @@ Options, compatibility, other setups, troubleshooting and security notes are in 
 | Command         | Does                                                                                                   |
 | --------------- | ------------------------------------------------------------------------------------------------------ |
 | `t3-dev setup`  | Copies itself to `~/.local/bin`, adds one `Include` line to the Windows user's `.ssh/config` (a copy of the file as it was is kept once, as `config.before-t3`), and installs a user-level systemd service that runs `t3-dev watch`. |
-| `t3-dev sync`   | Writes one SSH host per dev container that has the feature, into a file it owns next to that config. A stopped container keeps its host; a removed one loses it. |
+| `t3-dev sync`   | Writes one SSH host per dev container that has the feature, into a file it owns next to that config. A stopped container keeps its host; a removed one loses it. Also names an environment whose feature found no name (see below). |
 | `t3-dev watch`  | Runs `sync` whenever a container starts, stops or is removed. This is what the service runs.            |
 | `t3-dev list`   | Shows the hosts of running containers: the host, the name T3 Code shows for it once added, and the container ID. `-a` adds stopped containers. The two names are the same unless `T3_SERVER_LABEL` is set or two projects share a folder name. |
 | `t3-dev version` | Prints the tool's version. It is numbered separately from the feature; see [Versions](#versions).   |
@@ -61,6 +61,8 @@ Containers are matched by workspace folder, in either the form VS Code records f
 Each SSH host is named `t3-<project folder>`, lowercased, with anything outside `a-z`, `0-9` and `-` turned into `-`. That is also what the feature calls the environment by default, so the host you pick in **Add environment** is the name T3 Code then shows. Setting `T3_SERVER_LABEL` changes the name in T3 Code only; the host stays, and with it the environment T3 Code has saved.
 
 A folder keeps the host it was given. Two projects with the same folder name get `t3-<folder>` and `t3-<folder>-2` in the order they were first seen, and neither changes when the other stops or starts. Removing a container, as a rebuild does, takes its host off the list but not away from the folder: the name stays reserved while the folder exists, and the next container of that folder gets it back. Both projects are still called `t3-<folder>` in T3 Code, because each server names itself without knowing about the other; `t3-dev list` points this out, and a `T3_SERVER_LABEL` in one of them tells them apart there.
+
+The feature can only work out the folder's name for a project mounted at `/workspaces/<folder>`. For any other, a Docker Compose project for example, T3 Code would show the container ID. `sync` gives such an environment its host's name, by writing it to `/etc/machine-info` in the container, the file T3 Code reads the name from. The server reads that file when it starts, so `sync` restarts the server if the container started within the last two minutes, when no work can be running yet. A container that has been up longer keeps its server; `t3-dev list` then says so, and the name applies the next time the container starts, or after `t3-server restart` in it. A `/etc/machine-info` the image brought along is left as it is, and so is any environment the feature did name, including one with `T3_SERVER_LABEL`.
 
 ### Verifying a download
 
