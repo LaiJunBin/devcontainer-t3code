@@ -27,6 +27,7 @@ Usage: t3-server <command>
   stop              stop it
   restart           stop, then start
   logs [-n LINES]   show the server log without pairing secrets
+  label             print the name T3 Code shows for this environment
 EOF
 }
 
@@ -50,6 +51,48 @@ repair_data_owner() {
     chown -R "$owner" "$DATA_DIR" 2>/dev/null || true
   elif command -v sudo >/dev/null 2>&1; then
     sudo -n chown -R "$owner" "$DATA_DIR" 2>/dev/null || true
+  fi
+}
+
+# The name T3 Code shows for this environment. Without help it is the
+# hostname, which in a container is the container ID. T3 Code reads
+# PRETTY_HOSTNAME from /etc/machine-info before the hostname, so a name built
+# from the project's folder goes there: t3-<folder>, lowercased, with anything
+# outside a-z, 0-9 and "-" turned into "-". t3-dev names the SSH host after
+# this same label, so the name picked when adding the environment is the name
+# it then shows. T3_SERVER_LABEL (containerEnv) replaces the default.
+MACHINE_INFO=/etc/machine-info
+LABEL_MARKER="# PRETTY_HOSTNAME written by the t3-server dev container feature"
+
+environment_label() {
+  local label="${T3_SERVER_LABEL:-}"
+  if [ -z "$label" ]; then
+    # Dev container tools mount the project at /workspaces/<folder name>.
+    local folder
+    folder="$(awk '$5 ~ /^\/workspaces\/[^\/]+$/ { n = split($5, part, "/"); print part[n]; exit }' /proc/self/mountinfo 2>/dev/null || true)"
+    if [ -n "$folder" ]; then
+      label="t3-$(printf '%s' "$folder" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+    fi
+  fi
+  # One line, no quotes: it ends up inside a quoted value.
+  label="$(printf '%s' "$label" | tr -d '"\\\n\r' | tr -d "'" | cut -c1-64)"
+  printf '%s' "$label"
+}
+
+apply_environment_label() {
+  local label content
+  label="$(environment_label)"
+  [ -n "$label" ] || return 0
+  # A machine-info that someone else wrote is theirs to keep.
+  if [ -e "$MACHINE_INFO" ] && ! grep -qxF "$LABEL_MARKER" "$MACHINE_INFO" 2>/dev/null; then
+    return 0
+  fi
+  content="${LABEL_MARKER}"$'\n'"PRETTY_HOSTNAME=\"${label}\""
+  [ "$(cat "$MACHINE_INFO" 2>/dev/null)" = "$content" ] && return 0
+  if [ "$(id -u)" -eq 0 ]; then
+    printf '%s\n' "$content" >"$MACHINE_INFO" 2>/dev/null || true
+  elif command -v sudo >/dev/null 2>&1; then
+    printf '%s\n' "$content" | sudo -n tee "$MACHINE_INFO" >/dev/null 2>&1 || true
   fi
 }
 
@@ -229,7 +272,7 @@ cmd_logs() {
 
 command="${1:-}"
 case "$command" in
-  status | start | stop | restart | logs | prepare) ;;
+  status | start | stop | restart | logs | prepare | label) ;;
   -h | --help | help | "")
     usage
     exit 0
@@ -240,7 +283,15 @@ case "$command" in
     ;;
 esac
 
+if [ "$command" = "label" ]; then
+  # Needs no particular user and must print nothing else: t3-dev reads it.
+  environment_label
+  echo
+  exit 0
+fi
+
 repair_data_owner
+apply_environment_label
 ensure_server_user "$@"
 shift
 case "$command" in

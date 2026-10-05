@@ -42,7 +42,7 @@ Options, compatibility, other setups, troubleshooting and security notes are in 
 | `t3-dev setup`  | Copies itself to `~/.local/bin`, adds one `Include` line to the Windows user's `.ssh/config` (a copy of the file as it was is kept once, as `config.before-t3`), and installs a user-level systemd service that runs `t3-dev watch`. |
 | `t3-dev sync`   | Writes one SSH host per running dev container that has the feature, into a file it owns next to that config. Hosts of stopped containers stay listed while their folder exists. |
 | `t3-dev watch`  | Runs `sync` whenever a container starts or stops. This is what the service runs.                       |
-| `t3-dev list`   | Shows the hosts and whether each one's container is running.                                           |
+| `t3-dev list`   | Shows the hosts, whether each one's container is running, and its container ID. When a host's name differs from the name T3 Code shows for it (a custom `T3_SERVER_LABEL`, or two projects with the same folder name), a column with that name is added. |
 | `t3-dev remove` | Stops the service and takes the `Include` line and its own files out again.                            |
 
 It changes nothing else on Windows. `remove` edits the SSH config as it is at that moment and deletes only the line `setup` added, so whatever you or other tools wrote to the file in between is kept; the backup is never copied back.
@@ -50,6 +50,8 @@ It changes nothing else on Windows. `remove` edits the SSH config as it is at th
 Without user-level systemd in the WSL distro, `setup` says so and you run `t3-dev sync` yourself after starting a new project's container.
 
 Containers are matched by workspace folder, in either the form VS Code records for WSL folders or the plain Linux form.
+
+Each SSH host is named after the label its container reports, `t3-<project folder>` by default, which is also the name T3 Code shows for the environment once it is added. A custom `T3_SERVER_LABEL` is lowercased and reduced to `a-z`, `0-9` and `-` for the host name and kept inside the `t3-` prefix, so in that case the two differ in form. Two projects with the same folder name get the same label; the second host gets a `-2` suffix, and giving one of them a `T3_SERVER_LABEL` tells them apart in T3 Code as well.
 
 ## Support
 

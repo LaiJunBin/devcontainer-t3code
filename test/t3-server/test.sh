@@ -49,6 +49,22 @@ runtime_is_linked() {
     [ "$(as_server_user cat "${dir}/.install-complete")" = "$T3_SERVER_VERSION" ]
 }
 
+# The project is mounted at /workspaces/<folder>. T3 Code should show
+# t3-<folder> for the environment, the same name t3-dev gives the SSH host,
+# instead of the container ID.
+environment_label_follows_the_workspace() {
+  local expected
+  expected="$(awk '$5 ~ /^\/workspaces\/[^\/]+$/ { n = split($5, part, "/"); print part[n]; exit }' /proc/self/mountinfo)"
+  [ -n "$expected" ] || return 0
+  expected="t3-$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+  [ "$(t3-server label)" = "$expected" ] || return 1
+  # Writing it needs root; without root or sudo there is nothing to assert.
+  if [ ! -e /etc/machine-info ] && [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    return 0
+  fi
+  grep -qxF "PRETTY_HOSTNAME=\"${expected}\"" /etc/machine-info
+}
+
 listens_on_configured_host() {
   grep -Fq "\"host\":\"${T3_SERVER_HOST}\"" /var/lib/t3-server/userdata/server-runtime.json
 }
@@ -82,6 +98,7 @@ check "log is private" bash -c "[ \"\$(stat -c %a /var/lib/t3-server/server.log)
 check "logs hide pairing secrets" bash -c "! t3-server logs -n 500 | grep -e 'Token:' -e 'Pairing URL:' -e '[█▀▄]'"
 check "pairing link is rewritten" bash -c "t3-pair 38101 | grep -F 'http://127.0.0.1:38101/'"
 check "server listens on the configured address" listens_on_configured_host
+check "environment label follows the workspace folder" environment_label_follows_the_workspace
 check "home links to the data volume" server_home_is_linked
 check "image runtime is offered to SSH clients" runtime_is_linked
 if [ "$T3_SERVER_SSH" = "true" ]; then

@@ -1,6 +1,6 @@
 {
   "id": "t3-server",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "name": "T3 Code server",
   "description": "Installs a pinned, hash-verified T3 Code server, starts it with the container, and lets a T3 Code client reach it over SSH through `docker exec`, so the dev container becomes a T3 Code environment without publishing any port.",
   "documentationURL": "https://github.com/pingdotgg/t3code",

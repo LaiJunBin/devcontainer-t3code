@@ -177,13 +177,13 @@ cmd_setup() {
 
 cmd_sync() {
   load_state
-  local ssh_dir="$T3_DEV_SSH_DIR" managed id folder user name base count=0
+  local ssh_dir="$T3_DEV_SSH_DIR" managed id folder user name base shown count=0
   managed="${ssh_dir}/${MANAGED_NAME}"
   if ! grep -qxF "$INCLUDE_LINE" "${ssh_dir}/config" 2>/dev/null; then
     fail "the Include line is missing from ${ssh_dir}/config; run 't3-dev setup' again"
   fi
 
-  local tmp seen=" "
+  local tmp seen=" " seen_folders=$'\n'
   tmp="$(mktemp)"
   {
     echo "# Written by 't3-dev sync'. Do not edit; rerun the command instead."
@@ -195,20 +195,35 @@ cmd_sync() {
     user="$("$T3_DEV_DOCKER" exec "$id" sh -c ". ${FEATURE_CONFIG} && printf %s \"\$T3_SERVER_USER\"" </dev/null 2>/dev/null)" || continue
     [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]] || continue
 
-    # The last path component, whichever separator the folder uses.
-    base="${folder//\\//}"
-    base="$(basename "$base" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-\n' '-')"
-    name="t3-${base}"
+    # The host is named after the label the environment shows in T3 Code, so
+    # the two match. Feature versions without 'label' fall back to the folder
+    # name, built the same way the feature builds its default label.
+    base="$("$T3_DEV_DOCKER" exec "$id" t3-server label </dev/null 2>/dev/null || true)"
+    # What T3 Code shows for the environment, kept next to the host so 'list'
+    # can show the two side by side when a custom label makes them differ.
+    shown="$base"
+    if [ -z "$base" ]; then
+      base="${folder//\\//}"
+      base="t3-$(basename "$base")"
+    fi
+    base="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+    [ -n "$shown" ] || shown="$base"
+    # Always inside the t3- namespace: a custom label must not be able to
+    # shadow a real host such as github.com in the SSH config.
+    [[ "$base" == t3-* ]] || base="t3-${base}"
+    name="$base"
     local suffix=2
     while [[ "$seen" == *" ${name} "* ]]; do
-      name="t3-${base}-${suffix}"
+      name="${base}-${suffix}"
       suffix=$((suffix + 1))
     done
     seen="${seen}${name} "
+    seen_folders="${seen_folders}${folder}"$'\n'
 
     cat >>"$tmp" <<EOF
 
 # ${folder}
+#label ${shown}
 Host ${name}
     User ${user}
     ProxyCommand wsl.exe -d ${T3_DEV_DISTRO} -- ${INSTALL_PATH} connect ${name} $(encode_folder "$folder")
@@ -225,7 +240,7 @@ EOF
   # not running, which is more useful than the host vanishing from the list.
   if [ -f "$managed" ]; then
     local kept
-    kept="$(carry_over_stopped "$managed" "$seen")"
+    kept="$(carry_over_stopped "$managed" "$seen" "$seen_folders")"
     if [ -n "$kept" ]; then
       printf '%s\n' "$kept" >>"$tmp"
     fi
@@ -250,17 +265,22 @@ EOF
 
 # Prints the entries of the previous host file ($1) that are not among the
 # names just written ($2, space-separated) and whose workspace folder still
-# exists: a stopped container stays listed, a deleted project does not.
+# exists: a stopped container stays listed, a deleted project does not. An
+# entry for a folder that was just written ($3, one per line) is dropped too:
+# its container is running under a new name because its label changed.
 carry_over_stopped() {
-  local file="$1" seen="$2" line folder="" name="" block=""
+  local file="$1" seen="$2" seen_folders="$3" line folder="" name="" block=""
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "# Written by"* | "# Each host"*) ;;
       "# "*)
-        emit_carried_block "$name" "$folder" "$block" "$seen"
+        emit_carried_block "$name" "$folder" "$block" "$seen" "$seen_folders"
         folder="${line#\# }"
         name=""
         block="$line"
+        ;;
+      "#label "*)
+        [ -n "$block" ] && block+=$'\n'"$line"
         ;;
       "Host "*)
         name="${line#Host }"
@@ -271,13 +291,14 @@ carry_over_stopped() {
         ;;
     esac
   done <"$file"
-  emit_carried_block "$name" "$folder" "$block" "$seen"
+  emit_carried_block "$name" "$folder" "$block" "$seen" "$seen_folders"
 }
 
 emit_carried_block() {
-  local name="$1" folder="$2" block="$3" seen="$4"
+  local name="$1" folder="$2" block="$3" seen="$4" seen_folders="$5"
   [ -n "$name" ] || return 0
   [[ "$seen" == *" ${name} "* ]] && return 0
+  [[ "$seen_folders" == *$'\n'"${folder}"$'\n'* ]] && return 0
   # Only Linux paths can be checked from here; others are kept.
   if [[ "$folder" == /* ]] && [ ! -d "$folder" ]; then
     return 0
@@ -290,26 +311,57 @@ cmd_list() {
   local managed="${T3_DEV_SSH_DIR}/${MANAGED_NAME}"
   [ -f "$managed" ] || fail "nothing synced yet; run 't3-dev sync'"
 
-  # Hosts of stopped containers stay in the file, so say which ones are up.
-  local running=$'\n' id folder
+  # Hosts of stopped containers stay in the file, so say which ones are up,
+  # and as which container: that is the ID other Docker commands want.
+  local -A container_of=()
+  local id folder
   while IFS=$'\t' read -r id folder; do
-    running+="${folder}"$'\n'
+    container_of["$folder"]="$id"
   done < <(running_dev_containers 2>/dev/null)
 
-  local line state
+  local line state shown="" host
+  local -a hosts=() states=() ids=() folders=() labels=()
+  local labels_differ=false
   folder=""
-  printf '  %-28s %-8s %s\n' "HOST" "STATE" "FOLDER"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "# Written by"* | "# Each host"*) ;;
-      "# "*) folder="${line#\# }" ;;
+      "# "*)
+        folder="${line#\# }"
+        shown=""
+        ;;
+      "#label "*) shown="${line#\#label }" ;;
       "Host "*)
+        host="${line#Host }"
+        id="${container_of["$folder"]:-}"
         state=stopped
-        [[ "$running" == *$'\n'"${folder}"$'\n'* ]] && state=running
-        printf '  %-28s %-8s %s\n' "${line#Host }" "$state" "$folder"
+        [ -n "$id" ] && state=running
+        [ -n "$shown" ] || shown="$host"
+        [ "$shown" = "$host" ] || labels_differ=true
+        hosts+=("$host")
+        states+=("$state")
+        ids+=("${id:--}")
+        folders+=("$folder")
+        labels+=("$shown")
         ;;
     esac
   done <"$managed"
+
+  # The name T3 Code shows is the host name unless T3_SERVER_LABEL is set or
+  # two projects share a folder name. Only then is a column for it worth its
+  # width; otherwise it would repeat the first column on every row.
+  local i
+  if "$labels_differ"; then
+    printf '  %-28s %-24s %-8s %-13s %s\n' "HOST" "SHOWN IN T3 CODE AS" "STATE" "CONTAINER" "FOLDER"
+    for i in "${!hosts[@]}"; do
+      printf '  %-28s %-24s %-8s %-13s %s\n' "${hosts[$i]}" "${labels[$i]}" "${states[$i]}" "${ids[$i]}" "${folders[$i]}"
+    done
+  else
+    printf '  %-28s %-8s %-13s %s\n' "HOST" "STATE" "CONTAINER" "FOLDER"
+    for i in "${!hosts[@]}"; do
+      printf '  %-28s %-8s %-13s %s\n' "${hosts[$i]}" "${states[$i]}" "${ids[$i]}" "${folders[$i]}"
+    done
+  fi
 }
 
 # Runs until stopped: resync shortly after any container starts or stops.
