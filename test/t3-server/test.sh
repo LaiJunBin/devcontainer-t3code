@@ -49,13 +49,22 @@ runtime_is_linked() {
     [ "$(as_server_user cat "${dir}/.install-complete")" = "$T3_SERVER_VERSION" ]
 }
 
-# The project is mounted at /workspaces/<folder>. T3 Code should show
-# t3-<folder> for the environment, the same name t3-dev gives the SSH host,
-# instead of the container ID.
+# The feature's containerEnv carries the project folder's name, filled in by
+# the dev container tool. If this fails the tool left "${...}" in place and
+# the name would depend on where the project is mounted.
+tool_filled_in_the_folder_name() {
+  # shellcheck disable=SC2016 # a literal ${ is what an unsubstituted value has
+  case "${T3_SERVER_DEFAULT_LABEL:-}" in
+    *'${'* | "" | "t3-") return 1 ;;
+    t3-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# T3 Code should show t3-<folder> for the environment, the same name t3-dev
+# gives the SSH host, instead of the container ID.
 environment_label_follows_the_workspace() {
-  local expected
-  expected="$(awk '$5 ~ /^\/workspaces\/[^\/]+$/ { n = split($5, part, "/"); print part[n]; exit }' /proc/self/mountinfo)"
-  [ -n "$expected" ] || return 0
+  local expected="${T3_SERVER_DEFAULT_LABEL#t3-}"
   expected="t3-$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
   [ "$(t3-server label)" = "$expected" ] || return 1
   # Writing it needs root; without root or sudo there is nothing to assert.
@@ -86,6 +95,29 @@ starts_despite_stale_pid_file() {
   return "$result"
 }
 
+# Only in the Docker Compose scenario, and before anything below starts the
+# server by hand.
+not_mounted_under_workspaces() {
+  ! awk '$5 ~ /^\/workspaces\// { found = 1 } END { exit !found }' /proc/self/mountinfo
+}
+
+# The entrypoint starts the server without waiting for it.
+server_was_started_by_the_entrypoint() {
+  local tries=0
+  until t3-server status >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 60 ] || return 1
+    sleep 1
+  done
+}
+
+if [ "${T3_TEST_SCENARIO:-}" = "compose" ]; then
+  check "the project is not under /workspaces" not_mounted_under_workspaces
+  check "the entrypoint started the server" server_was_started_by_the_entrypoint
+  # shellcheck disable=SC2016 # expanded by the inner shell
+  check "the name is not the container's hostname" bash -c '[ -n "$(t3-server label)" ] && [ "$(t3-server label)" != "$(hostname)" ]'
+fi
+
 check "t3 is the pinned version" bash -c "t3 --version | grep -F '${T3_SERVER_VERSION}'"
 check "install tree is not writable by others" bash -c "[ -z \"\$(find /opt/t3-server -perm /022 -print -quit)\" ]"
 check "server starts and answers" bash -c "t3-server start && t3-server status"
@@ -98,6 +130,7 @@ check "log is private" bash -c "[ \"\$(stat -c %a /var/lib/t3-server/server.log)
 check "logs hide pairing secrets" bash -c "! t3-server logs -n 500 | grep -e 'Token:' -e 'Pairing URL:' -e '[█▀▄]'"
 check "pairing link is rewritten" bash -c "t3-pair 38101 | grep -F 'http://127.0.0.1:38101/'"
 check "server listens on the configured address" listens_on_configured_host
+check "the tool filled in the project folder's name" tool_filled_in_the_folder_name
 check "environment label follows the workspace folder" environment_label_follows_the_workspace
 check "home links to the data volume" server_home_is_linked
 check "image runtime is offered to SSH clients" runtime_is_linked

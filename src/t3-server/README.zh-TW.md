@@ -62,7 +62,7 @@ t3-dev setup    # 只需一次
 - **建置映像時：** 從官方的 GitHub release 下載壓縮檔，和這個 Feature 裡釘住的 SHA-256 比對，然後安裝到 `/opt/t3-server`。容器啟動時不會下載任何東西。
 - **資料：** thread、歷史紀錄和配對狀態存放在每個 dev container 專屬的具名 volume，掛載在 `/var/lib/t3-server`，權限 `0700`。remote user 的 `~/.t3` 會連結到它。
 - **啟動：** Feature 的 entrypoint 在背景啟動伺服器，不拖慢容器啟動。伺服器從 `/` 啟動、以 remote user 身分執行、關閉產品遙測，並只監聽 loopback。
-- **名稱：** T3 Code 原本會把容器 ID 當成環境名稱。Feature 改寫成 `t3-<資料夾>`，寫在 `/etc/machine-info` 的 `PRETTY_HOSTNAME`，T3 Code 會優先採用它。資料夾指的是掛載在 `/workspaces/<資料夾>` 的那個，轉成小寫，`a-z`、`0-9`、`-` 以外的字元都換成 `-`。`t3-dev` 也用同樣的方式由資料夾替 SSH 主機命名，所以新增環境時選的名稱，就是之後顯示的名稱。已經存在、且不是 Feature 寫的 `/etc/machine-info` 不會被更動。`t3-server label` 會印出目前使用的名稱。
+- **名稱：** T3 Code 原本會把容器 ID 當成環境名稱。Feature 改寫成 `t3-<資料夾>`，寫在 `/etc/machine-info` 的 `PRETTY_HOSTNAME`，T3 Code 會優先採用它。資料夾指的是專案在主機上的資料夾，轉成小寫，`a-z`、`0-9`、`-` 以外的字元都換成 `-`。這個名稱由 dev container 工具透過 Feature 的 `containerEnv` 提供，所以專案掛載在容器的哪個路徑都沒關係，Docker Compose 的專案也一樣。`t3-dev` 也用同樣的方式由資料夾替 SSH 主機命名，所以新增環境時選的名稱，就是之後顯示的名稱。已經存在、且不是 Feature 寫的 `/etc/machine-info` 不會被更動。`t3-server label` 會印出目前使用的名稱。
 - **SSH 入口：** `/usr/local/share/t3-server/ssh-session` 透過標準輸入輸出提供一次 SSH 連線。不會有 SSH daemon 在執行，也不開任何連接埠。它的 host key 存在資料 volume 裡，並使用自己的設定檔；映像原本的系統 SSH 設定不會被更動。
 - **讓用戶端沿用：** T3 Code 的 SSH 模式會在 `~/.t3` 尋找執行中的伺服器，以及與自己同版本的已安裝 runtime。兩者它都找得到，所以既不會啟動第二個伺服器，也不會再下載一份。
 
@@ -173,7 +173,7 @@ Host t3-myproject
 | SSH：`no running dev container for ...`           | 容器已停止。啟動它即可，不需要重新 sync。                                                                                                            |
 | SSH：host key changed                             | 資料 volume 被重新建立了。執行 `t3-dev sync`，它會清掉舊的 key。                                                                                     |
 | `git status` 看得到變更，Diff 面板卻沒有          | 回應的是另一個由用戶端從家目錄啟動的伺服器。執行 `t3-server status`；如果 Feature 的伺服器沒在執行，啟動它後重新連線。                               |
-| 環境名稱是容器 ID                                 | 專案不是掛載在 `/workspaces` 底下，或映像有自己的 `/etc/machine-info`。在 `containerEnv` 設定 `T3_SERVER_LABEL`，然後執行 `t3-server restart`。      |
+| 環境名稱是容器 ID                                 | 容器是用 0.3.4 以前的 Feature 建的，而且專案不是掛載在 `/workspaces/<資料夾>`（重建即可）；或映像有自己的 `/etc/machine-info`；或 dev container 工具沒有填入資料夾名稱。其餘情況請在 `containerEnv` 設定 `T3_SERVER_LABEL` 後重建。之後到 T3 Code 把環境移除再重新加入。 |
 | 改了 `T3_SERVER_LABEL`，T3 Code 仍顯示舊名稱      | T3 Code 會保留加入環境當下取得的名稱。到 **Settings → Connections** 移除該環境，再用同一個主機加入一次；thread 存在容器的資料 volume 裡，不會消失。 |
 | 新增環境時取代了另一個環境，或出現 `[ssh_http:401]` | 這個 SSH 主機現在通往的容器，和 T3 Code 第一次連它時不同，而程式還握著舊的連線。請完全結束 T3 Code 再重新開啟，用 `t3-dev list` 核對主機與資料夾，然後再加入環境。 |
 | provider 顯示為未安裝                             | 它的 CLI 不在伺服器的 `PATH` 上。安裝後執行 `t3-server restart`；伺服器是在啟動時讀取 `PATH` 的。                                                    |

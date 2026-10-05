@@ -9,19 +9,34 @@
   "debian_slim_root_no_ssh": {
     "image": "debian:12-slim",
     "features": {
-      "t3-server": { "ssh": false }
+      "t3-server": {
+        "ssh": false
+      }
     }
   },
   "rocky_root_no_ssh": {
     "image": "rockylinux:9",
     "features": {
-      "t3-server": { "ssh": false }
+      "t3-server": {
+        "ssh": false
+      }
     }
   },
   "not_strict_skips_root_image": {
     "image": "debian:12-slim",
     "features": {
-      "t3-server": { "strict": false }
+      "t3-server": {
+        "strict": false
+      }
+    }
+  },
+  "compose_project_mounted_elsewhere": {
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "app",
+    "workspaceFolder": "/srv/app",
+    "remoteUser": "vscode",
+    "features": {
+      "t3-server": {}
     }
   }
 }

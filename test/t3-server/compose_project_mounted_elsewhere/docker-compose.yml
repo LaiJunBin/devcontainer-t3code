@@ -1,0 +1,8 @@
+# A Docker Compose dev container whose project is mounted somewhere other than
+# /workspaces/<folder>, as Compose projects usually are.
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/base:ubuntu-24.04
+    volumes:
+      - ..:/srv/app:cached
+    command: sleep infinity
