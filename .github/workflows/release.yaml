@@ -1,7 +1,8 @@
 name: Release
 
 # Publishing is a deliberate act: run this by hand from the main branch after
-# bumping "version" in the feature's devcontainer-feature.json.
+# bumping "version" in the feature's devcontainer-feature.json and
+# T3_DEV_VERSION in host/t3-dev.
 on:
   workflow_dispatch:
 
@@ -15,9 +16,17 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       # Actions are pinned to commits; a moved tag cannot change what publishes.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Read the version; t3-dev must carry the same one
+        id: version
+        run: |
+          version="$(jq -r .version src/t3-server/devcontainer-feature.json)"
+          [ "$(bash host/t3-dev version)" = "t3-dev ${version}" ]
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
       - name: Publish features to GHCR
         uses: devcontainers/action@bef2cf2d1a019b00b45e184f83035e01bd1972f3 # v1
         with:
@@ -26,3 +35,42 @@ jobs:
           generate-docs: "false"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # t3-dev is what 't3-dev update' and the install instructions download. It
+  # gets a GitHub release of its own, plus an artifact attestation: a signed
+  # statement in a public transparency log that this exact file came out of
+  # this workflow, which 'gh attestation verify' checks. Kept apart from the
+  # job above so that only this one can write to the repository.
+  helper:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag and the release
+      id-token: write # sign the attestation as this workflow
+      attestations: write # store it
+    env:
+      VERSION: ${{ needs.publish.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Stop if this version already has a release
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::v${VERSION} is already released; bump the version first"
+            exit 1
+          fi
+      - name: Collect the release files
+        run: |
+          mkdir dist
+          cp host/t3-dev dist/t3-dev
+          (cd dist && sha256sum t3-dev >t3-dev.sha256)
+      - name: Attest that t3-dev was built here
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/t3-dev
+      - name: Create the release
+        run: |
+          gh release create "v${VERSION}" dist/t3-dev dist/t3-dev.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "v${VERSION}" \
+            --notes "Feature \`ghcr.io/${GITHUB_REPOSITORY}/t3-server:${VERSION}\` and the matching \`t3-dev\` host helper. Update an installed helper with \`t3-dev update\`."

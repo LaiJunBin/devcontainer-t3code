@@ -18,7 +18,7 @@ This is an unofficial, community feature. It is not affiliated with or supported
 
 That is the whole project-side change. The dev container needs a non-root `remoteUser`, and a provider CLI (see [Providers](#providers)).
 
-On the machine that runs Docker, give the desktop app's `ssh` a way into the container. For Docker inside WSL with T3 Code on Windows, the [`t3-dev`](../../host/t3-dev) helper in this repository does it:
+On the machine that runs Docker, give the desktop app's `ssh` a way into the container. For Docker inside WSL with T3 Code on Windows, the [`t3-dev`](../../host/t3-dev) helper in this repository does it ([how to get it](../../README.md#quick-start-windows-docker-in-wsl)):
 
 ```bash
 t3-dev setup    # once

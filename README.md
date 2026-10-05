@@ -21,11 +21,14 @@ Two parts:
    }
    ```
 
-2. Once, in WSL, from a checkout of this repository:
+2. Once, in WSL, download the helper from the latest release and let it install itself:
 
    ```bash
-   host/t3-dev setup
+   curl -fsSLO https://github.com/laijunbin/devcontainer-t3code/releases/latest/download/t3-dev
+   bash t3-dev setup && rm t3-dev
    ```
+
+   To check the file before running it, see [Verifying a download](#verifying-a-download). From a checkout of this repository, `host/t3-dev setup` does the same. Later, `t3-dev update` fetches a newer release.
 
 3. Start the dev container.
 
@@ -42,7 +45,9 @@ Options, compatibility, other setups, troubleshooting and security notes are in 
 | `t3-dev setup`  | Copies itself to `~/.local/bin`, adds one `Include` line to the Windows user's `.ssh/config` (a copy of the file as it was is kept once, as `config.before-t3`), and installs a user-level systemd service that runs `t3-dev watch`. |
 | `t3-dev sync`   | Writes one SSH host per running dev container that has the feature, into a file it owns next to that config. Hosts of stopped containers stay listed while their folder exists. |
 | `t3-dev watch`  | Runs `sync` whenever a container starts or stops. This is what the service runs.                       |
-| `t3-dev list`   | Shows the hosts, whether each one's container is running, and its container ID. When a host's name differs from the name T3 Code shows for it (a custom `T3_SERVER_LABEL`, or two projects with the same folder name), a column with that name is added. |
+| `t3-dev list`   | Shows each host, the name T3 Code shows for it, whether its container is running, and its container ID. The two names are the same unless `T3_SERVER_LABEL` is set or two projects share a folder name. |
+| `t3-dev version` | Prints the tool's version, which is the version of the feature it was released with.                 |
+| `t3-dev update` | Downloads `t3-dev` from the latest release, checks it (see below), shows the old and new version, and replaces itself after you confirm; `--yes` skips the question. Then reruns `setup`. |
 | `t3-dev remove` | Stops the service and takes the `Include` line and its own files out again.                            |
 
 It changes nothing else on Windows. `remove` edits the SSH config as it is at that moment and deletes only the line `setup` added, so whatever you or other tools wrote to the file in between is kept; the backup is never copied back.
@@ -52,6 +57,24 @@ Without user-level systemd in the WSL distro, `setup` says so and you run `t3-de
 Containers are matched by workspace folder, in either the form VS Code records for WSL folders or the plain Linux form.
 
 Each SSH host is named after the label its container reports, `t3-<project folder>` by default, which is also the name T3 Code shows for the environment once it is added. A custom `T3_SERVER_LABEL` is lowercased and reduced to `a-z`, `0-9` and `-` for the host name and kept inside the `t3-` prefix, so in that case the two differ in form. Two projects with the same folder name get the same label; the second host gets a `-2` suffix, and giving one of them a `T3_SERVER_LABEL` tells them apart in T3 Code as well.
+
+### Verifying a download
+
+`t3-dev` never contacts the network on its own; only `update` does, and only when you run it. A new feature version does not require a new `t3-dev` unless the release notes say so.
+
+Each release carries `t3-dev`, its SHA-256 in `t3-dev.sha256`, and a GitHub [artifact attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) for `t3-dev`. They protect against different things:
+
+| Check       | Tells you                                                                                                       | Does not tell you                          |
+| ----------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| SHA-256     | The download arrived intact.                                                                                    | Who published it: the hash sits next to the file. |
+| Attestation | This exact file was produced by this repository's `release.yaml` workflow, signed through Sigstore and recorded in a public transparency log. A file swapped on the release page afterwards fails it. | That the source it was built from is harmless. Read it; it is one shell script. |
+
+`update` always checks the SHA-256. It checks the attestation too when the [GitHub CLI](https://cli.github.com/) is installed and signed in, and refuses the file if that fails; without the CLI it says that the check was skipped. To check by hand, before the first `setup` for instance:
+
+```bash
+gh attestation verify t3-dev --repo laijunbin/devcontainer-t3code \
+  --signer-workflow laijunbin/devcontainer-t3code/.github/workflows/release.yaml
+```
 
 ## Support
 
@@ -63,7 +86,7 @@ Maintained on a best-effort basis. What is known to work is what the **Test** wo
 
 1. Download `t3-<version>-linux-x64.tar.gz` and `t3-<version>-linux-arm64.tar.gz` from the official release page.
 2. Run `sha256sum` on both and add the two lines to `src/t3-server/versions.sh`. Compute the hashes yourself; do not copy them from the release's `SHA256SUMS`, which is what the pin is meant to be independent of.
-3. Update the default and `proposals` of the `version` option, the version in `test/t3-server/test.sh`, and bump the feature's own `version` in `devcontainer-feature.json`.
+3. Update the default and `proposals` of the `version` option, the version in `test/t3-server/test.sh`, and bump the feature's own `version` in `devcontainer-feature.json` together with `T3_DEV_VERSION` in `host/t3-dev`; the two must match.
 4. Push, wait for the **Test** workflow to pass, then run the **Release** workflow.
 
 ### Workflows
@@ -71,9 +94,11 @@ Maintained on a best-effort basis. What is known to work is what the **Test** wo
 | Workflow    | Trigger                     | Does                                                                                                                      |
 | ----------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | **Test**    | every push and pull request | `shellcheck`, then builds a container with the feature per image and architecture and runs `test/t3-server/test.sh` in it |
-| **Release** | manual, from `main` only    | publishes `src/*` to `ghcr.io/<owner>/<repo>/<feature>`                                                                   |
+| **Release** | manual, from `main` only    | publishes `src/*` to `ghcr.io/<owner>/<repo>/<feature>`, then creates the tag and GitHub release `v<version>` with `t3-dev`, its checksum and its attestation |
 
-Third-party actions are pinned to commit SHAs. Releasing is manual so that the published feature only changes on purpose.
+Third-party actions are pinned to commit SHAs. Releasing is manual so that the published feature only changes on purpose. Only the release's second job can write to the repository, and a version that already has a release is refused, so a released `t3-dev` is not replaced by a rerun.
+
+Turn on **Settings → General → Releases → Enable release immutability** in the repository. GitHub then locks each release's tag and files once it is published, so not even the owner's account can swap them later.
 
 The first release creates a private package. Open the package's settings on GitHub and set its visibility to public.
 

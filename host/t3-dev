@@ -8,6 +8,11 @@
 # over `docker exec`.
 set -euo pipefail
 
+# Released together with the feature and numbered like it; the lint job fails
+# when this and devcontainer-feature.json disagree.
+T3_DEV_VERSION=0.3.2
+T3_DEV_REPO=laijunbin/devcontainer-t3code
+
 MANAGED_NAME=t3-containers.conf
 KNOWN_HOSTS_NAME=known_hosts_t3_containers
 INCLUDE_LINE="Include ${MANAGED_NAME}"
@@ -28,6 +33,9 @@ Usage: t3-dev <command>
   list      show the SSH hosts written by the last sync
   watch     sync whenever a container starts or stops (what the service runs)
   remove    undo setup
+  update    replace this tool with the latest release, after asking (--yes
+            skips the question)
+  version   print this tool's version
 
 In T3 Code: Settings → Connections → Add environment → SSH, then pick or type
 one of the t3-<folder> names.
@@ -319,10 +327,11 @@ cmd_list() {
     container_of["$folder"]="$id"
   done < <(running_dev_containers 2>/dev/null)
 
+  # T3 CODE NAME is what the environment is called in T3 Code. It equals the
+  # host unless T3_SERVER_LABEL is set or two projects share a folder name.
   local line state shown="" host
-  local -a hosts=() states=() ids=() folders=() labels=()
-  local labels_differ=false
   folder=""
+  printf '  %-28s %-24s %-8s %-13s %s\n' "HOST" "T3 CODE NAME" "STATE" "CONTAINER" "FOLDER"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "# Written by"* | "# Each host"*) ;;
@@ -336,32 +345,10 @@ cmd_list() {
         id="${container_of["$folder"]:-}"
         state=stopped
         [ -n "$id" ] && state=running
-        [ -n "$shown" ] || shown="$host"
-        [ "$shown" = "$host" ] || labels_differ=true
-        hosts+=("$host")
-        states+=("$state")
-        ids+=("${id:--}")
-        folders+=("$folder")
-        labels+=("$shown")
+        printf '  %-28s %-24s %-8s %-13s %s\n' "$host" "${shown:-$host}" "$state" "${id:--}" "$folder"
         ;;
     esac
   done <"$managed"
-
-  # The name T3 Code shows is the host name unless T3_SERVER_LABEL is set or
-  # two projects share a folder name. Only then is a column for it worth its
-  # width; otherwise it would repeat the first column on every row.
-  local i
-  if "$labels_differ"; then
-    printf '  %-28s %-24s %-8s %-13s %s\n' "HOST" "SHOWN IN T3 CODE AS" "STATE" "CONTAINER" "FOLDER"
-    for i in "${!hosts[@]}"; do
-      printf '  %-28s %-24s %-8s %-13s %s\n' "${hosts[$i]}" "${labels[$i]}" "${states[$i]}" "${ids[$i]}" "${folders[$i]}"
-    done
-  else
-    printf '  %-28s %-8s %-13s %s\n' "HOST" "STATE" "CONTAINER" "FOLDER"
-    for i in "${!hosts[@]}"; do
-      printf '  %-28s %-8s %-13s %s\n' "${hosts[$i]}" "${states[$i]}" "${ids[$i]}" "${folders[$i]}"
-    done
-  fi
 }
 
 # Runs until stopped: resync shortly after any container starts or stops.
@@ -447,12 +434,107 @@ cmd_remove() {
   echo "  ${INSTALL_PATH} is left in place; delete it to finish uninstalling."
 }
 
+# Replaces the installed tool with the one attached to the latest GitHub
+# release. Nothing else in this tool goes to the network, and this only does
+# when asked to: a tool that edits the Windows SSH config should not change
+# itself in the background.
+cmd_update() {
+  local assume_yes=false
+  case "${1:-}" in
+    -y | --yes) assume_yes=true ;;
+    "") ;;
+    *) fail "unknown option for update: $1" ;;
+  esac
+  [ -x "$INSTALL_PATH" ] || fail "not set up yet; run 't3-dev setup' first"
+  command -v curl >/dev/null 2>&1 || fail "update needs curl"
+  command -v sha256sum >/dev/null 2>&1 || fail "update needs sha256sum"
+
+  # T3_DEV_RELEASE_BASE_URL points at a mirror of the release's files. Only
+  # the default location is restricted to HTTPS.
+  local base="${T3_DEV_RELEASE_BASE_URL:-}" work
+  local -a fetch=(curl -fsSL --max-time 60)
+  if [ -z "$base" ]; then
+    base="https://github.com/${T3_DEV_REPO}/releases/latest/download"
+    fetch+=(--proto '=https' --tlsv1.2)
+  fi
+  work="$(mktemp -d)"
+  # shellcheck disable=SC2064 # expand now: $work is local to this function
+  trap "rm -rf '${work}'" EXIT
+
+  "${fetch[@]}" -o "${work}/t3-dev" "${base}/t3-dev" ||
+    fail "could not download ${base}/t3-dev"
+  "${fetch[@]}" -o "${work}/t3-dev.sha256" "${base}/t3-dev.sha256" ||
+    fail "could not download ${base}/t3-dev.sha256"
+
+  # Catches a damaged download. The hash comes from the same place as the
+  # file, so it says nothing about who published it; the attestation does.
+  local expected actual
+  expected="$(awk 'NR == 1 { print $1 }' "${work}/t3-dev.sha256")"
+  actual="$(sha256sum "${work}/t3-dev" | awk '{ print $1 }')"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || fail "the published checksum is not a SHA-256 hash"
+  [ "$expected" = "$actual" ] || fail "checksum mismatch: the download is damaged or was altered"
+  bash -n "${work}/t3-dev" 2>/dev/null || fail "the downloaded file is not a valid script"
+
+  local latest
+  latest="$(sed -n 's/^T3_DEV_VERSION=\([0-9][0-9A-Za-z.-]*\)$/\1/p' "${work}/t3-dev" | head -n 1)"
+  [ -n "$latest" ] || fail "the downloaded file does not state its version"
+  if cmp -s "${work}/t3-dev" "$INSTALL_PATH"; then
+    echo "t3-dev: already up to date (${latest})."
+    return 0
+  fi
+
+  # The release workflow signs the file through GitHub's artifact
+  # attestations: proof, kept in a public transparency log, that this exact
+  # file was built by that workflow in this repository. Checking it needs the
+  # GitHub CLI, signed in.
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    gh attestation verify "${work}/t3-dev" --repo "$T3_DEV_REPO" \
+      --signer-workflow "${T3_DEV_REPO}/.github/workflows/release.yaml" >/dev/null 2>&1 ||
+      fail "the download is not attested as built by ${T3_DEV_REPO}'s release workflow; not installing it"
+    echo "t3-dev: verified as built by ${T3_DEV_REPO}'s release workflow."
+  else
+    echo "t3-dev: checksum matches. Who built the file was not checked: that needs the"
+    echo "  GitHub CLI, signed in ('gh auth login'). See the README, 'Verifying a download'."
+  fi
+
+  local installed
+  installed="$(sed -n 's/^T3_DEV_VERSION=\([0-9][0-9A-Za-z.-]*\)$/\1/p' "$INSTALL_PATH" | head -n 1)"
+  echo "t3-dev: ${installed:-unknown version} → ${latest}"
+  if ! "$assume_yes"; then
+    [ -t 0 ] || fail "not a terminal; rerun as 't3-dev update --yes' to install without asking"
+    local answer
+    read -r -p "Install it? [y/N] " answer
+    case "$answer" in
+      y | Y | yes | YES) ;;
+      *)
+        echo "t3-dev: left as it was."
+        return 0
+        ;;
+    esac
+  fi
+
+  # Moved into place rather than written over: this script is still being read
+  # from the old file.
+  install -m 0755 "${work}/t3-dev" "${INSTALL_PATH}.new"
+  mv -f "${INSTALL_PATH}.new" "$INSTALL_PATH"
+  rm -rf "$work"
+  trap - EXIT
+  echo "t3-dev: installed ${latest}."
+  # The new version reapplies its own setup: service file, host list.
+  exec "$INSTALL_PATH" setup
+}
+
 case "${1:-}" in
   setup) cmd_setup ;;
+  update)
+    shift
+    cmd_update "$@"
+    ;;
   sync) cmd_sync ;;
   list) cmd_list ;;
   watch) cmd_watch ;;
   remove) cmd_remove ;;
+  version | --version | -V) echo "t3-dev ${T3_DEV_VERSION}" ;;
   connect)
     shift
     cmd_connect "$@"

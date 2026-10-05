@@ -20,6 +20,12 @@ jobs:
             src/t3-server/scripts/entrypoint.sh src/t3-server/scripts/ssh-session \
             src/t3-server/scripts/t3-server host/t3-dev \
             src/t3-server/scripts/t3-pair test/t3-server/*.sh
+      - name: t3-dev and the feature carry the same version
+        run: |
+          feature="$(jq -r .version src/t3-server/devcontainer-feature.json)"
+          helper="$(bash host/t3-dev version)"
+          echo "feature ${feature}, ${helper}"
+          [ "$helper" = "t3-dev ${feature}" ]
 
   # The images and architectures below, together with test/t3-server/scenarios.json,
   # are the list of setups the feature is known to work on. Add one here or
