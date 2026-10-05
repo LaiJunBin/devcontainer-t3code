@@ -42,7 +42,7 @@ For other setups, see [Connecting without the helper](#connecting-without-the-he
 | `host`      | `127.0.0.1` | Address the server listens on in the container. `0.0.0.0` is only for [publishing the port](#publishing-a-port-instead). |
 | `strict`    | `true`      | Fail the build when the image cannot run the feature. `false` skips the feature instead (see [For every dev container](#for-every-dev-container)). |
 
-`T3CODE_PORT` (default `3773`) and `T3CODE_TELEMETRY_ENABLED` (default `false`) can be overridden through the project's `containerEnv`. So can `T3_SERVER_LABEL`, the name T3 Code shows for the environment; by default it is `t3-<project folder>`.
+`T3CODE_PORT` (default `3773`) and `T3CODE_TELEMETRY_ENABLED` (default `false`) can be overridden through the project's `containerEnv`. So can `T3_SERVER_LABEL`, the name T3 Code shows for the environment; by default it is `t3-<project folder>`. T3 Code stores the name when the environment is added, so after changing it, rebuild the container, then remove the environment in T3 Code and add the same host again.
 
 ## Commands in the container
 
@@ -174,6 +174,8 @@ Run `t3-pair 38101` in the container and paste the link into **Add environment**
 | SSH: host key changed                             | The data volume was recreated. Run `t3-dev sync`, which forgets the old key.                                                                         |
 | The Diff panel shows no changes that `git status` shows | A second server, launched by the client from the home directory, is answering. Run `t3-server status`; if the feature's server is not running, start it and reconnect. |
 | The environment is named after the container ID   | The project is not mounted under `/workspaces`, or the image has its own `/etc/machine-info`. Set `T3_SERVER_LABEL` in `containerEnv`, then `t3-server restart`. |
+| `T3_SERVER_LABEL` was changed but T3 Code shows the old name | T3 Code keeps the name it got when the environment was added. Remove the environment under **Settings → Connections** and add the same host again; threads live in the container's data volume and stay. |
+| Adding an environment replaces another one, or fails with `[ssh_http:401]` | The SSH host now leads to a different container than when T3 Code first connected to it, and the app is still holding the old connection. Quit T3 Code completely and start it again, check hosts and folders with `t3-dev list`, then add the environment. |
 | The provider shows as not installed               | Its CLI is not on the server's `PATH`. Run `t3-server restart` after installing it; the server reads `PATH` when it starts.                          |
 
 ## Security notes

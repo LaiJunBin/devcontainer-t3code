@@ -42,7 +42,7 @@ t3-dev setup    # 只需一次
 | `host`      | `127.0.0.1` | 伺服器在容器內監聽的位址。`0.0.0.0` 只用於[改用發布連接埠](#改用發布連接埠)的做法。                  |
 | `strict`    | `true`      | 映像無法執行這個 Feature 時讓建置失敗。設為 `false` 則改為略過 Feature（見[套用到所有 dev container](#套用到所有-dev-container)）。 |
 
-`T3CODE_PORT`（預設 `3773`）和 `T3CODE_TELEMETRY_ENABLED`（預設 `false`）可以透過專案的 `containerEnv` 覆寫。`T3_SERVER_LABEL` 也可以，它是 T3 Code 顯示的環境名稱；預設是 `t3-<專案資料夾>`。
+`T3CODE_PORT`（預設 `3773`）和 `T3CODE_TELEMETRY_ENABLED`（預設 `false`）可以透過專案的 `containerEnv` 覆寫。`T3_SERVER_LABEL` 也可以，它是 T3 Code 顯示的環境名稱；預設是 `t3-<專案資料夾>`。T3 Code 是在加入環境的當下把名稱存起來的，所以改了之後要先重建容器，再到 T3 Code 把該環境移除，用同一個主機重新加入。
 
 ## 容器內的指令
 
@@ -174,6 +174,8 @@ Host t3-myproject
 | SSH：host key changed                             | 資料 volume 被重新建立了。執行 `t3-dev sync`，它會清掉舊的 key。                                                                                     |
 | `git status` 看得到變更，Diff 面板卻沒有          | 回應的是另一個由用戶端從家目錄啟動的伺服器。執行 `t3-server status`；如果 Feature 的伺服器沒在執行，啟動它後重新連線。                               |
 | 環境名稱是容器 ID                                 | 專案不是掛載在 `/workspaces` 底下，或映像有自己的 `/etc/machine-info`。在 `containerEnv` 設定 `T3_SERVER_LABEL`，然後執行 `t3-server restart`。      |
+| 改了 `T3_SERVER_LABEL`，T3 Code 仍顯示舊名稱      | T3 Code 會保留加入環境當下取得的名稱。到 **Settings → Connections** 移除該環境，再用同一個主機加入一次；thread 存在容器的資料 volume 裡，不會消失。 |
+| 新增環境時取代了另一個環境，或出現 `[ssh_http:401]` | 這個 SSH 主機現在通往的容器，和 T3 Code 第一次連它時不同，而程式還握著舊的連線。請完全結束 T3 Code 再重新開啟，用 `t3-dev list` 核對主機與資料夾，然後再加入環境。 |
 | provider 顯示為未安裝                             | 它的 CLI 不在伺服器的 `PATH` 上。安裝後執行 `t3-server restart`；伺服器是在啟動時讀取 `PATH` 的。                                                    |
 
 ## 安全性說明
