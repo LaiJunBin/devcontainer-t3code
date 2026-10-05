@@ -155,11 +155,30 @@ url="${RELEASE_BASE_URL}/v${VERSION}/${archive}"
 staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
 
-echo "t3-server feature: downloading ${archive}"
+# A connection that stalls must not hang the image build: give up on one that
+# moves less than 1 kB/s for 30 seconds, then retry, continuing the partial
+# file. The hash check below covers whatever a resumed download produces.
+echo "t3-server feature: downloading ${archive} (about 70 MB) from ${RELEASE_BASE_URL}"
+# On a slow link this is the step a build sits on, so say how far it is: a
+# silent build looks hung.
+(
+  while sleep 20; do
+    size="$(wc -c <"${staging}/${archive}" 2>/dev/null || echo 0)"
+    echo "t3-server feature: downloaded $((size / 1048576)) MB so far"
+  done
+) &
+progress_pid=$!
+download_status=0
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --retry 3 --retry-delay 2 -o "${staging}/${archive}" "$url" || unsupported "could not download ${url}"
+  curl -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 30 \
+    --retry 4 --retry-delay 2 -C - -o "${staging}/${archive}" "$url" || download_status=$?
 else
-  wget -q -O "${staging}/${archive}" "$url" || unsupported "could not download ${url}"
+  wget -q --timeout=30 --tries=5 --continue -O "${staging}/${archive}" "$url" || download_status=$?
+fi
+kill "$progress_pid" 2>/dev/null || true
+wait "$progress_pid" 2>/dev/null || true
+if [ "$download_status" -ne 0 ]; then
+  unsupported "could not download ${url} (stalled or unreachable after several tries)"
 fi
 
 actual="$(sha256sum "${staging}/${archive}" | cut -d' ' -f1)"

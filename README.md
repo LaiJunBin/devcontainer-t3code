@@ -46,7 +46,7 @@ Options, compatibility, other setups, troubleshooting and security notes are in 
 | `t3-dev sync`   | Writes one SSH host per running dev container that has the feature, into a file it owns next to that config. Hosts of stopped containers stay listed while their folder exists. |
 | `t3-dev watch`  | Runs `sync` whenever a container starts or stops. This is what the service runs.                       |
 | `t3-dev list`   | Shows each host, the name T3 Code shows for it, whether its container is running, and its container ID. The two names are the same unless `T3_SERVER_LABEL` is set or two projects share a folder name. |
-| `t3-dev version` | Prints the tool's version, which is the version of the feature it was released with.                 |
+| `t3-dev version` | Prints the tool's version. It is numbered separately from the feature; see [Versions](#versions).   |
 | `t3-dev update` | Downloads `t3-dev` from the latest release, checks it (see below), shows the old and new version, and replaces itself after you confirm; `--yes` skips the question. Then reruns `setup`. |
 | `t3-dev remove` | Stops the service and takes the `Include` line and its own files out again.                            |
 
@@ -60,9 +60,9 @@ Each SSH host is named after the label its container reports, `t3-<project folde
 
 ### Verifying a download
 
-`t3-dev` never contacts the network on its own; only `update` does, and only when you run it. A new feature version does not require a new `t3-dev` unless the release notes say so.
+`t3-dev` never contacts the network on its own; only `update` does, and only when you run it.
 
-Each release carries `t3-dev`, its SHA-256 in `t3-dev.sha256`, and a GitHub [artifact attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) for `t3-dev`. They protect against different things:
+Each `t3-dev` release carries `t3-dev`, its SHA-256 in `t3-dev.sha256`, and a GitHub [artifact attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) for `t3-dev`. They protect against different things:
 
 | Check       | Tells you                                                                                                       | Does not tell you                          |
 | ----------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
@@ -76,6 +76,17 @@ gh attestation verify t3-dev --repo laijunbin/devcontainer-t3code \
   --signer-workflow laijunbin/devcontainer-t3code/.github/workflows/release.yaml
 ```
 
+## Versions
+
+The feature and `t3-dev` are versioned and released separately, because updating them costs very different amounts:
+
+| Part      | Version is in                             | Released as                                                                  | You get it by                                              |
+| --------- | ----------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Feature   | `src/t3-server/devcontainer-feature.json` | `ghcr.io/laijunbin/devcontainer-t3code/t3-server:<version>`, git tag `feature_t3-server_<version>` | rebuilding the dev container, which downloads the server (about 70 MB) again |
+| `t3-dev`  | `T3_DEV_VERSION` in `host/t3-dev`         | GitHub release and git tag `t3-dev-v<version>`                               | `t3-dev update`, a few seconds                             |
+
+Any `t3-dev` works with any feature version; neither has to be updated because the other was. One thing depends on the feature's version: from feature 0.3.1 on, the SSH host and the name shown in T3 Code agree. With an older feature in a container, `t3-dev` names the host after the folder and T3 Code shows the container ID.
+
 ## Support
 
 Maintained on a best-effort basis. What is known to work is what the **Test** workflow builds and tests, on x64 and arm64: the images in its matrix and the variants in `test/t3-server/scenarios.json`. `t3-dev` is exercised by hand on Windows 11 with Docker in WSL 2. Reports for other setups are welcome, with the image name and the output; fixes may or may not follow.
@@ -86,7 +97,7 @@ Maintained on a best-effort basis. What is known to work is what the **Test** wo
 
 1. Download `t3-<version>-linux-x64.tar.gz` and `t3-<version>-linux-arm64.tar.gz` from the official release page.
 2. Run `sha256sum` on both and add the two lines to `src/t3-server/versions.sh`. Compute the hashes yourself; do not copy them from the release's `SHA256SUMS`, which is what the pin is meant to be independent of.
-3. Update the default and `proposals` of the `version` option, the version in `test/t3-server/test.sh`, and bump the feature's own `version` in `devcontainer-feature.json` together with `T3_DEV_VERSION` in `host/t3-dev`; the two must match.
+3. Update the default and `proposals` of the `version` option, the version in `test/t3-server/test.sh`, and bump the feature's own `version` in `devcontainer-feature.json`. `t3-dev` does not change.
 4. Push, wait for the **Test** workflow to pass, then run the **Release** workflow.
 
 ### Workflows
@@ -94,9 +105,11 @@ Maintained on a best-effort basis. What is known to work is what the **Test** wo
 | Workflow    | Trigger                     | Does                                                                                                                      |
 | ----------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | **Test**    | every push and pull request | `shellcheck`, then builds a container with the feature per image and architecture and runs `test/t3-server/test.sh` in it |
-| **Release** | manual, from `main` only    | publishes `src/*` to `ghcr.io/<owner>/<repo>/<feature>`, then creates the tag and GitHub release `v<version>` with `t3-dev`, its checksum and its attestation |
+| **Release** | manual, from `main` only    | for whichever of the two has a version without a tag yet: publishes the feature to `ghcr.io/<owner>/<repo>/<feature>` and tags it, and creates the GitHub release `t3-dev-v<version>` with `t3-dev`, its checksum and its attestation |
 
-Third-party actions are pinned to commit SHAs. Releasing is manual so that the published feature only changes on purpose. Only the release's second job can write to the repository, and a version that already has a release is refused, so a released `t3-dev` is not replaced by a rerun.
+Third-party actions are pinned to commit SHAs. Releasing is manual so that what is published only changes on purpose. Only the release's second job can write to the repository.
+
+To release, bump the version of the part that changed and run **Release**. A part whose version is already tagged is skipped, so releasing `t3-dev` alone does not make projects download the server again. If a part's files changed but its version did not, the workflow stops and says which one to bump, instead of skipping it or publishing new content under a used number.
 
 Turn on **Settings → General → Releases → Enable release immutability** in the repository. GitHub then locks each release's tag and files once it is published, so not even the owner's account can swap them later.
 

@@ -8,9 +8,9 @@
 # over `docker exec`.
 set -euo pipefail
 
-# Released together with the feature and numbered like it; the lint job fails
-# when this and devcontainer-feature.json disagree.
-T3_DEV_VERSION=0.3.2
+# This tool's own version, independent of the feature's. Bump it when this
+# file changes; the Release workflow publishes it as t3-dev-v<version>.
+T3_DEV_VERSION=0.3.3
 T3_DEV_REPO=laijunbin/devcontainer-t3code
 
 MANAGED_NAME=t3-containers.conf
