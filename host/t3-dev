@@ -10,7 +10,7 @@ set -euo pipefail
 
 # This tool's own version, independent of the feature's. Bump it when this
 # file changes; the Release workflow publishes it as t3-dev-v<version>.
-T3_DEV_VERSION=0.5.0
+T3_DEV_VERSION=0.5.1
 T3_DEV_REPO=laijunbin/devcontainer-t3code
 
 MANAGED_NAME=t3-containers.conf
@@ -412,7 +412,14 @@ name_environment() {
   fi
 
   # Not restarted: say what the running server answers with, if it answers.
-  served="$("$T3_DEV_DOCKER" exec "$id" sh -c ". ${FEATURE_CONFIG} && url=\"http://127.0.0.1:\${T3CODE_PORT:-\$T3_SERVER_PORT}/.well-known/t3/environment\" && { curl -fsS --max-time 3 \"\$url\" 2>/dev/null || wget -qO- -T 3 \"\$url\" 2>/dev/null; }" </dev/null 2>/dev/null |
+  # Feature 0.x runs it on a configured port; with 1.x the app picked one,
+  # recorded in the server's runtime file.
+  local info user home port=""
+  if info="$(container_user "$id")"; then
+    IFS=$'\t' read -r user home <<<"$info"
+    port="$(runtime_value "$id" "$user" "$home" port)"
+  fi
+  served="$("$T3_DEV_DOCKER" exec "$id" sh -c ". ${FEATURE_CONFIG} && url=\"http://127.0.0.1:\${T3CODE_PORT:-\${T3_SERVER_PORT:-${port}}}/.well-known/t3/environment\" && { curl -fsS --max-time 3 \"\$url\" 2>/dev/null || wget -qO- -T 3 \"\$url\" 2>/dev/null; }" </dev/null 2>/dev/null |
     sed -n 's/.*"label":"\([^"]*\)".*/\1/p' | head -n 1 | tr -d '[:cntrl:]' || true)"
   if [ -n "$served" ] && [ "$served" != "$name" ]; then
     shown="$served"
@@ -533,7 +540,7 @@ cmd_list() {
         shown_count["${shown:-$host}"]=$((${shown_count["${shown:-$host}"]:-0} + 1))
         rows=$((rows + 1))
         if [ -n "$wanted" ] && [ "$state" = running ]; then
-          pending+=("${host}: becomes '${wanted}' when its container next starts, or now with: docker exec ${id} t3-server restart")
+          pending+=("${host}: becomes '${wanted}' when its T3 Code server next starts: docker exec ${id} t3-server stop, then reconnect in T3 Code (feature 0.x: t3-server restart)")
         fi
         ;;
     esac
@@ -752,8 +759,8 @@ cmd_update() {
 # that a phone's browser can open:
 #
 #   phone ──Tailscale──► Windows: tailscale serve ──► WSL 127.0.0.1:<port>
-#     ──► systemd socket, one connection at a time ──► 't3-dev relay'
-#     ──► ssh -W over the feature's docker-exec entry point ──► the server
+#     ──► one ssh -L per project, kept up by a user service ('t3-dev tunnel')
+#     ──► the feature's docker-exec entry point ──► the server
 #
 # The port is kept per project folder, like the SSH host name, because the
 # phone stores each environment under its address. One container, the hub
@@ -834,51 +841,70 @@ find_tailscale() {
   return 1
 }
 
+# Every call is bounded: 'tailscale serve' waits, without end, for someone to
+# enable Serve for the tailnet in a browser the first time it is used.
 tailscale_run() {
-  "$T3_DEV_PHONE_TAILSCALE" "$@"
+  timeout "${T3_DEV_TAILSCALE_TIMEOUT:-30}" "$T3_DEV_PHONE_TAILSCALE" "$@"
+}
+
+# Publishes https://<name>:<port> for 127.0.0.1:<port>. On failure, says why,
+# with the link Tailscale asks to open when Serve is not enabled yet.
+phone_serve() {
+  local port="$1" out rc=0 link line
+  out="$(tailscale_run serve --bg --https="$port" "http://127.0.0.1:${port}" 2>&1 </dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  link="$(grep -o 'https://login\.tailscale\.com[^[:space:]]*' <<<"$out" | head -n 1 || true)"
+  if [ -n "$link" ]; then
+    echo "t3-dev: Tailscale Serve is not enabled for your tailnet yet. Open this link, enable it," >&2
+    echo "  then run 't3-dev phone on' again:" >&2
+    echo "  ${link}" >&2
+  elif [ "$rc" -eq 124 ]; then
+    echo "t3-dev: tailscale serve did not finish within ${T3_DEV_TAILSCALE_TIMEOUT:-30} seconds for port ${port}." >&2
+    echo "  Run it by hand to see what it waits for:" >&2
+    echo "  \"${T3_DEV_PHONE_TAILSCALE}\" serve --bg --https=${port} http://127.0.0.1:${port}" >&2
+  else
+    echo "t3-dev: tailscale serve failed for port ${port}:" >&2
+    while IFS= read -r line; do echo "  ${line}" >&2; done <<<"$out"
+  fi
+  return 1
 }
 
 phone_unit_name() {
   printf 't3-dev-phone-%s' "$1"
 }
 
-# A socket that hands every connection on 127.0.0.1:<port> to 't3-dev relay'
-# for one folder. Windows reaches it through WSL's localhost forwarding.
+# A service that keeps 127.0.0.1:<port> forwarded to the folder's server
+# ('t3-dev tunnel'). One SSH connection carries every request: setting one up
+# takes about a second, too slow to do per request when the web app loads
+# dozens of files at once. Windows reaches the port through WSL's localhost
+# forwarding.
 phone_install_unit() {
   local port="$1" folder="$2" name
   name="$(phone_unit_name "$port")"
   mkdir -p "$PHONE_UNIT_DIR"
-  cat >"${PHONE_UNIT_DIR}/${name}.socket" <<EOF
+  cat >"${PHONE_UNIT_DIR}/${name}.service" <<EOF
 [Unit]
 Description=T3 Code phone access to ${folder}
 
-[Socket]
-ListenStream=127.0.0.1:${port}
-Accept=yes
+[Service]
+ExecStart=${INSTALL_PATH} tunnel ${port} $(encode_folder "$folder")
+Restart=always
+RestartSec=5
 
 [Install]
-WantedBy=sockets.target
-EOF
-  cat >"${PHONE_UNIT_DIR}/${name}@.service" <<EOF
-[Unit]
-Description=T3 Code phone connection to ${folder}
-
-[Service]
-ExecStart=${INSTALL_PATH} relay $(encode_folder "$folder")
-StandardInput=socket
-StandardOutput=socket
-StandardError=journal
+WantedBy=default.target
 EOF
 }
 
+# Also removes the per-connection socket units of 0.5.0.
 phone_remove_unit() {
   local name
   name="$(phone_unit_name "$1")"
-  systemctl --user disable --now "${name}.socket" >/dev/null 2>&1 || true
-  rm -f "${PHONE_UNIT_DIR}/${name}.socket" "${PHONE_UNIT_DIR}/${name}@.service"
+  systemctl --user disable --now "${name}.service" "${name}.socket" >/dev/null 2>&1 || true
+  rm -f "${PHONE_UNIT_DIR}/${name}.service" "${PHONE_UNIT_DIR}/${name}.socket" "${PHONE_UNIT_DIR}/${name}@.service"
 }
 
-# Brings the sockets and tailscale serve entries in line with the projects in
+# Brings the tunnels and tailscale serve entries in line with the projects in
 # the host list ($1, the managed file): every folder with a Host entry gets a
 # port, and a port whose folder is gone is released.
 phone_sync() {
@@ -907,7 +933,7 @@ phone_sync() {
     # the address saved.
     if [ -z "${wanted["$folder"]:-}" ] && folder_is_gone "$folder"; then
       port="${port_of["$folder"]}"
-      [ -n "${served["$port"]:-}" ] && tailscale_run serve --https="$port" off >/dev/null 2>&1
+      [ -n "${served["$port"]:-}" ] && { tailscale_run serve --https="$port" off >/dev/null 2>&1 </dev/null || true; }
       unset "served[$port]"
       phone_remove_unit "$port"
       unset "port_of[$folder]"
@@ -940,7 +966,10 @@ phone_sync() {
   local changed=false
   for folder in "${!port_of[@]}"; do
     port="${port_of["$folder"]}"
-    if [ ! -f "${PHONE_UNIT_DIR}/$(phone_unit_name "$port").socket" ]; then
+    if [ -f "${PHONE_UNIT_DIR}/$(phone_unit_name "$port").socket" ]; then
+      phone_remove_unit "$port"
+    fi
+    if [ ! -f "${PHONE_UNIT_DIR}/$(phone_unit_name "$port").service" ]; then
       phone_install_unit "$port" "$folder"
       changed=true
     fi
@@ -950,13 +979,15 @@ phone_sync() {
   fi
   for folder in "${!port_of[@]}"; do
     port="${port_of["$folder"]}"
-    systemctl --user enable --now "$(phone_unit_name "$port").socket" >/dev/null 2>&1 ||
-      echo "t3-dev: could not start the phone socket for ${folder} on port ${port}" >&2
+    systemctl --user enable --now "$(phone_unit_name "$port").service" >/dev/null 2>&1 ||
+      echo "t3-dev: could not start the phone tunnel for ${folder} on port ${port}" >&2
     if [ -z "${served["$port"]:-}" ]; then
-      if tailscale_run serve --bg --https="$port" "http://127.0.0.1:${port}" >/dev/null 2>&1; then
+      echo "t3-dev: publishing $(phone_url "$port") for ${folder}" >&2
+      if phone_serve "$port"; then
         served["$port"]=1
       else
-        echo "t3-dev: tailscale serve failed for port ${port}; is HTTPS enabled for your tailnet? Run 't3-dev phone on' to see the error" >&2
+        # The same reason applies to the rest; one message is enough.
+        break
       fi
     fi
   done
@@ -996,34 +1027,64 @@ container_t3() {
   printf '%s/.t3/runtime/versions/%s/t3' "$home" "$version"
 }
 
+# The list is read whole first: leaving the producer mid-way would make its
+# writes fail with a broken pipe.
 container_of_folder() {
-  local id folder
+  local list id folder
+  list="$(running_dev_containers)"
   while IFS=$'\t' read -r id folder; do
     if [ "$folder" = "$1" ]; then
       echo "$id"
       return 0
     fi
-  done < <(running_dev_containers)
+  done <<<"$list"
   return 1
 }
 
-# Called by the phone socket with the connection on stdin/stdout. Finds where
-# the folder's server listens right now (the app picks the port when it
-# starts it) and carries the connection there over the SSH entry point.
-cmd_relay() {
+# Run by a project's phone service: keeps 127.0.0.1:<port> forwarded to the
+# folder's server for as long as it runs. The server's port is read from its
+# runtime file, since the app picks it when it starts the server. Every
+# T3_DEV_TUNNEL_CHECK_SECONDS (15) the tunnel is set up again when the
+# container was replaced, the server moved to another port, or ssh ended;
+# while there is no container or no server it waits.
+cmd_tunnel() {
   load_state
-  local folder id info user home port
-  folder="$(decode_folder "${1:-}")" || fail "relay needs an encoded folder"
-  [ -n "$folder" ] || fail "relay needs an encoded folder"
-  id="$(container_of_folder "$folder")" || fail "phone: the dev container for ${folder} is not running"
-  info="$(container_user "$id")" || fail "phone: ${folder} has no t3-server feature"
-  IFS=$'\t' read -r user home <<<"$info"
-  port="$(runtime_value "$id" "$user" "$home" port)"
-  [[ "$port" =~ ^[0-9]+$ ]] || fail "phone: no T3 Code server runs in the container for ${folder}; connect to it once from the T3 Code app"
-  exec ssh -F /dev/null -o BatchMode=yes -o LogLevel=ERROR \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ProxyCommand="${T3_DEV_DOCKER} exec -i -u root ${id} ${SESSION}" \
-    -W "127.0.0.1:${port}" "${user}@t3-relay"
+  local lport="${1:-}" folder
+  [[ "$lport" =~ ^[0-9]+$ ]] || fail "usage: t3-dev tunnel <port> <encoded folder>"
+  folder="$(decode_folder "${2:-}")" || fail "tunnel needs an encoded folder"
+  [ -n "$folder" ] || fail "tunnel needs an encoded folder"
+  local check="${T3_DEV_TUNNEL_CHECK_SECONDS:-15}" ssh_pid="" id info user home sport current said=""
+  trap '[ -n "$ssh_pid" ] && kill "$ssh_pid" 2>/dev/null; exit 0' TERM INT
+  while :; do
+    sport=""
+    if id="$(container_of_folder "$folder")" && info="$(container_user "$id")"; then
+      IFS=$'\t' read -r user home <<<"$info"
+      sport="$(runtime_value "$id" "$user" "$home" port)"
+    fi
+    if [[ "$sport" =~ ^[0-9]+$ ]]; then
+      echo "t3-dev: forwarding 127.0.0.1:${lport} to ${folder} (server port ${sport} in container ${id:0:12})" >&2
+      said=""
+      ssh -N -F /dev/null -o BatchMode=yes -o LogLevel=ERROR \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+        -o ProxyCommand="${T3_DEV_DOCKER} exec -i -u root ${id} ${SESSION}" \
+        -L "127.0.0.1:${lport}:127.0.0.1:${sport}" "${user}@t3-tunnel" </dev/null &
+      ssh_pid=$!
+      while sleep "$check"; do
+        kill -0 "$ssh_pid" 2>/dev/null || break
+        [ "$(container_of_folder "$folder" || true)" = "$id" ] || break
+        current="$(runtime_value "$id" "$user" "$home" port)"
+        [ "$current" = "$sport" ] || break
+      done
+      kill "$ssh_pid" 2>/dev/null || true
+      wait "$ssh_pid" 2>/dev/null || true
+      ssh_pid=""
+    elif [ -z "$said" ]; then
+      echo "t3-dev: waiting for ${folder}: its container or its T3 Code server is not running" >&2
+      said=1
+    fi
+    sleep "$check"
+  done
 }
 
 hub_folder() {
@@ -1134,7 +1195,8 @@ phone_on() {
   T3_DEV_PHONE_TAILSCALE="$(find_tailscale)" ||
     fail "Tailscale for Windows was not found. Install it, sign in, and run this again"
   local status
-  status="$(tailscale_run status --json 2>/dev/null | tr -d '\r')" ||
+  echo "t3-dev: checking Tailscale at ${T3_DEV_PHONE_TAILSCALE}"
+  status="$(tailscale_run status --json 2>/dev/null </dev/null | tr -d '\r')" ||
     fail "tailscale is not running or not signed in"
   T3_DEV_PHONE_DNS="$(awk '/"Self"[[:space:]]*:/ { self = 1 } self && /"DNSName"/ { gsub(/.*"DNSName"[[:space:]]*:[[:space:]]*"|\.?".*/, ""); print; exit }' <<<"$status")"
   [[ "$T3_DEV_PHONE_DNS" == *.ts.net ]] ||
@@ -1143,14 +1205,11 @@ phone_on() {
   # back: the Tailscale configuration may have been reset in between.
   { phone_reservations 2>/dev/null | awk -F'\t' '{ print "port " $1 " " $2 }'; } | phone_write
   phone_sync "${T3_DEV_SSH_DIR}/${MANAGED_NAME}"
-  # One serve call that fails here shows the user why, which phone_sync keeps
-  # quiet about.
   local port
-  port="$(phone_reservations | head -n 1 | cut -f1)"
-  if [ -n "$port" ] && ! phone_served | grep -qx "$port"; then
-    tailscale_run serve --bg --https="$port" "http://127.0.0.1:${port}" || true
-    fail "tailscale serve did not accept the configuration (see above). HTTPS certificates have to be enabled for your tailnet"
-  fi
+  while IFS=$'\t' read -r port _; do
+    phone_served | grep -qx "$port" ||
+      fail "not every address could be published (see above); fix that, then run 't3-dev phone on' again"
+  done < <(phone_reservations)
   echo "t3-dev: phone access is on for ${T3_DEV_PHONE_DNS}."
   echo
   phone_status
@@ -1165,14 +1224,14 @@ phone_off() {
   load_phone
   local port folder
   while read -r port; do
-    tailscale_run serve --https="$port" off >/dev/null 2>&1 || true
+    tailscale_run serve --https="$port" off >/dev/null 2>&1 </dev/null || true
   done < <(phone_served)
   while IFS=$'\t' read -r port folder; do
     phone_remove_unit "$port"
   done < <(phone_reservations)
   systemctl --user daemon-reload >/dev/null 2>&1 || true
   rm -f "$PHONE_FILE"
-  echo "t3-dev: phone access is off: the tailnet addresses and the sockets are gone."
+  echo "t3-dev: phone access is off: the tailnet addresses and the tunnels are gone."
   echo "  Phones stay paired with each project until 't3-dev phone revoke' or a revoke in T3 Code."
 }
 
@@ -1189,7 +1248,10 @@ phone_status() {
     echo "Entry: no hub yet. Run 't3-dev hub init' and follow its steps."
   fi
   echo
-  printf '  %-28s %-38s %-12s %s\n' "HOST" "PHONE ADDRESS" "STATE" "ON THE PHONE"
+  echo "  (asking each running project which phones it has; this takes a few seconds each)" >&2
+  # Wide enough for this tailnet's addresses, which vary in length.
+  local width=$(( ${#T3_DEV_PHONE_DNS} + 15 ))
+  printf "  %-28s %-${width}s %-12s %s\n" "HOST" "PHONE ADDRESS" "STATE" "ON THE PHONE"
   while IFS=$'\t' read -r port folder; do
     [ "$folder" = "$hub" ] && continue
     host="$(host_of_folder "$folder" || echo "-")"
@@ -1209,7 +1271,7 @@ phone_status() {
     fi
     # The watch service may not reach tailscale.exe; a sync from a terminal can.
     phone_served | grep -qx "$port" || paired="address not published: run 't3-dev sync'"
-    printf '  %-28s %-38s %-12s %s\n' "$host" "$(phone_url "$port")" "$state" "$paired"
+    printf "  %-28s %-${width}s %-12s %s\n" "$host" "$(phone_url "$port")" "$state" "$paired"
   done < <(phone_reservations)
   echo
   echo "  A project is added on the phone once: open the entry, then Settings → Connections"
@@ -1241,7 +1303,9 @@ phone_pair() {
   [ -n "$url" ] || fail "the server did not return a pairing link"
   echo "One-time link for ${host}, valid for 10 minutes. It signs a device in; do not share it."
   if [ "$folder" = "$(hub_folder)" ]; then
-    echo "Open it on the phone. From then on, open $(phone_url "$port") to get to T3 Code."
+    echo "The entry is $(phone_url "$port"). On an iPhone, add it to the Home Screen from Safari"
+    echo "first, open it from there, and paste this link into its sign-in screen: the Home Screen"
+    echo "app keeps its own storage, apart from Safari's."
   else
     echo "On the phone, in the entry: Settings → Connections → Add environment, and paste it."
     echo "Do not open it directly; that would make this project a separate entry."
@@ -1300,9 +1364,9 @@ case "${1:-}" in
     shift
     cmd_connect "$@"
     ;;
-  relay)
+  tunnel)
     shift
-    cmd_relay "$@"
+    cmd_tunnel "$@"
     ;;
   hub)
     shift

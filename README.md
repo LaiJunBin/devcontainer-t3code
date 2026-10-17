@@ -2,7 +2,7 @@
 
 English | [繁體中文](README.zh-TW.md)
 
-Use a dev container as a [T3 Code](https://github.com/pingdotgg/t3code) environment: agents run inside the container, and the T3 Code desktop app drives them. The container publishes no port.
+Use a dev container as a [T3 Code](https://github.com/pingdotgg/t3code) environment: agents run inside the container, and the T3 Code desktop app drives them. The container publishes no port; with [phone access](#phone-access) on, `t3-dev` makes each project reachable from your own Tailscale devices, through `docker exec` as well.
 
 Unofficial; not affiliated with or supported by the T3 Code maintainers.
 
@@ -11,7 +11,7 @@ Two parts:
 | Part                                   | Where it runs        | What it does                                                                                   |
 | -------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------- |
 | [`t3-server`](src/t3-server/README.md) | in the dev container | A dev container feature: an SSH entry point that is only reachable through `docker exec`, a data volume, and a name for the environment. The desktop app installs and starts a server of its own version through it, so the feature does not change when T3 Code updates. |
-| [`t3-dev`](host/t3-dev)                | on the Docker host   | Registers each such container as an SSH host for the desktop app. Written for Docker inside WSL with T3 Code on Windows. |
+| [`t3-dev`](host/t3-dev)                | on the Docker host   | Registers each such container as an SSH host for the desktop app, and optionally makes the projects reachable from a phone over Tailscale. Written for Docker inside WSL with T3 Code on Windows. |
 
 ## Quick start (Windows, Docker in WSL)
 
@@ -54,9 +54,9 @@ Options, compatibility, other setups, troubleshooting and security notes are in 
 | `t3-dev phone` | Phone access over Tailscale: `on`, `off`, `pair <host>`, `revoke`, and without an argument the entry address and each project's state (see [Phone access](#phone-access)). |
 | `t3-dev remove` | Stops the service, turns phone access off, and takes the `Include` line and its own files out again.     |
 
-It changes nothing else on Windows. `remove` edits the SSH config as it is at that moment and deletes only the line `setup` added, so whatever you or other tools wrote to the file in between is kept; the backup is never copied back.
+Apart from that line, and the Tailscale Serve entries that [phone access](#phone-access) adds while it is on, it changes nothing on Windows. `remove` edits the SSH config as it is at that moment and deletes only the line `setup` added, so whatever you or other tools wrote to the file in between is kept; the backup is never copied back.
 
-Without user-level systemd in the WSL distro, `setup` says so and you run `t3-dev sync` yourself after starting a new project's container.
+Without user-level systemd in the WSL distro, `setup` says so and you run `t3-dev sync` yourself after starting a new project's container. Phone access needs it.
 
 Containers are matched by workspace folder, in either the form VS Code records for WSL folders or the plain Linux form.
 
@@ -64,7 +64,7 @@ Each SSH host is named `t3-<project folder>`, lowercased, with anything outside 
 
 A folder keeps the host it was given. Two projects with the same folder name get `t3-<folder>` and `t3-<folder>-2` in the order they were first seen, and neither changes when the other stops or starts. Removing a container, as a rebuild does, takes its host off the list but not away from the folder: the name stays reserved while the folder exists, and the next container of that folder gets it back. Both projects are still called `t3-<folder>` in T3 Code, because each server names itself without knowing about the other; `t3-dev list` points this out, and a `T3_SERVER_LABEL` in one of them tells them apart there.
 
-The feature can only work out the folder's name for a project mounted at `/workspaces/<folder>`. For any other, a Docker Compose project for example, T3 Code would show the container ID. `sync` gives such an environment its host's name, by writing it to `/etc/machine-info` in the container, the file T3 Code reads the name from. The server reads that file when it starts, so `sync` restarts the server if the container started within the last two minutes, when no work can be running yet. A container that has been up longer keeps its server; `t3-dev list` then says so, and the name applies the next time the container starts, or after `t3-server restart` in it. A `/etc/machine-info` the image brought along is left as it is, and so is any environment the feature did name, including one with `T3_SERVER_LABEL`.
+The feature can only work out the folder's name for a project mounted at `/workspaces/<folder>`. For any other, a Docker Compose project for example, T3 Code would show the container ID. `sync` gives such an environment its host's name, by writing it to `/etc/machine-info` in the container, the file T3 Code reads the name from. The server reads that file when it starts. With feature 1.0.0 or later the app starts the server when it connects, so a name written before that is used from the start. If the server was already running, `t3-dev list` says so, and the name applies once the server starts again: `t3-server stop` in the container, then reconnect in T3 Code. With feature 0.x, whose server starts with the container, `sync` restarts it if the container started within the last two minutes, when no work can be running yet. A `/etc/machine-info` the image brought along is left as it is, and so is any environment the feature did name, including one with `T3_SERVER_LABEL`.
 
 ## Phone access
 
@@ -72,32 +72,47 @@ A phone's browser can use every project too, from anywhere, over [Tailscale](htt
 
 ```
 phone ──Tailscale HTTPS──► Windows: tailscale serve ──► WSL 127.0.0.1:<port>
-      ──► one systemd socket per project ──► docker exec ──► the project's T3 Code server
+      ──► one SSH tunnel per project, kept up by a user service ──► docker exec ──► the project's T3 Code server
 ```
 
 Each project gets a fixed address, `https://<PC>.<tailnet>.ts.net:<port>`, kept per folder like its SSH host. The browser keeps its list of environments per address, so the phone always opens one entry, the **hub**: a dev container without a project whose T3 Code server only serves the web app. Projects are added in the hub once each; after that, opening the hub shows all of them.
 
 ### Setting it up, once
 
-1. Install Tailscale on Windows and on the phone, signed in to the same account. In the Tailscale admin console turn on **MagicDNS** and **HTTPS Certificates**.
+1. Install Tailscale on Windows and on the phone, signed in to the same account; that account guards the tailnet, so give it two-factor sign-in. In the Tailscale admin console:
+   - **DNS**: turn on **MagicDNS** and **HTTPS Certificates**. HTTPS certificates are recorded in public certificate-transparency logs, so the PC's name and the tailnet's name become public. Rename the PC under **Machines** first if its name says more than you want.
+   - **Machines**: on the PC, **Disable key expiry**, so its addresses do not stop working after 180 days.
+   - Leave **Funnel** off. It would put the projects on the open internet; Serve keeps them inside the tailnet.
 2. `t3-dev hub init`, then open the folder it names in VS Code and **Reopen in Container**. The hub keeps running when the window closes and starts with Docker.
 3. In T3 Code: **Add environment → SSH → t3-hub**. The app starts the hub's server, as for any project, and keeps it on the app's version.
-4. `t3-dev phone on`. It prints the entry address and the projects.
-5. `t3-dev phone pair hub`, and open that link on the phone. Bookmark the entry address it then shows.
-6. For each project: `t3-dev phone pair <host>`, and on the phone, in the entry, **Settings → Connections → Add environment**, paste the link. Do not open project links directly: the phone would then treat that project as a separate entry.
+4. `t3-dev phone on`. The first time, Tailscale asks for Serve to be enabled for the tailnet: `phone on` prints the link; open it, enable Serve, and run `phone on` again. It then prints the entry address and the projects.
+5. On the phone, open the entry address in Safari and **Share → Add to Home Screen**. T3 Code runs from there full screen. Do this before pairing: a home-screen web app keeps its own storage, apart from Safari's.
+6. `t3-dev phone pair hub`. Copy the link to the phone (with a QR code: point the camera at it, press and hold the link it shows, and copy) and paste it into the sign-in screen of the home-screen app.
+7. For each project: `t3-dev phone pair <host>`, copy the link the same way, and in the app: **Settings → Connections → Add environment**, paste it. Do not open project links directly: that would open Safari, and the project would become an entry of its own.
 
-`t3-dev phone` marks the projects not on the phone yet. A new project needs only step 6.
+`t3-dev phone` marks the projects not on the phone yet. A new project needs only step 7.
 
-Links are valid for ten minutes and once. With [`qrencode`](https://fukuchi.org/works/qrencode/) installed, `pair` also prints a QR code to scan.
+Links are valid for ten minutes and once. With [`qrencode`](https://fukuchi.org/works/qrencode/) installed, `pair` also prints a QR code.
 
 ### What to know
 
+- **Every device keeps its own list.** The environments a browser or app has added, and its sign-in to each, live in that browser or app, not in the hub. Adding a project on the PC does not add it on the phone, and Safari and the home-screen app are two separate lists. Each device can be signed out on its own.
 - **The PC has to be on, with the T3 Code app having connected** since each container started: servers start when the app connects. A container that is stopped, or whose server is not running, does not answer the phone.
-- **Every project's server is reachable from every device in your tailnet**, behind T3 Code's own sign-in. Keep the tailnet to your own devices, or restrict it with Tailscale's access rules, and protect the Tailscale account with two-factor sign-in.
-- **A lost phone:** `t3-dev phone revoke` signs phones and tablets out of every running project; start the stopped ones and run it again. `t3-dev phone off` removes the addresses and sockets.
+- **Every project's server is reachable from every device in your tailnet**, behind T3 Code's own sign-in. Keep the tailnet to your own devices, or restrict it with Tailscale's access rules.
+- **A lost phone:** `t3-dev phone revoke` signs phones and tablets out of every running project; start the stopped ones and run it again. `t3-dev phone off` removes the addresses and tunnels.
+- **"On the phone: yes"** means the project has a phone or tablet signed in, from any address. It cannot tell which browser or app that is.
 - **The hub picks up your default features** when VS Code opens it, Claude Code and a shared Claude login included. It holds no project, but a session on it can use what is installed there.
-- If the watch service cannot reach `tailscale.exe`, a new project's address is not published; `t3-dev phone` then shows it, and `t3-dev sync` in a terminal publishes it.
-- On iOS 16 in portrait, T3 Code may not show an agent's question with options. Turn the phone to landscape once; the options stay when you turn it back.
+- **iOS 16:** home-screen web apps get no push notifications. In portrait, T3 Code may not show an agent's question with options; turn the phone to landscape once, and the options stay when you turn it back.
+
+### Troubleshooting phone access
+
+| Symptom | Cause and fix |
+| ------- | ------------- |
+| `t3-dev phone on` stops with a `login.tailscale.com` link | Serve is not enabled for the tailnet yet. Open the link, enable it, run `phone on` again. |
+| The phone shows "T3 Code could not load" | The tunnel to that container is down or its server is not running. `t3-dev phone` shows the state; `journalctl --user -u t3-dev-phone-<port>.service` shows the tunnel's log. Connect to the project once from the T3 Code app, then reload. |
+| The phone asks for a token | That browser or app has not been paired with this address. Use `t3-dev phone pair`. |
+| A PC browser shows `DNS_PROBE_FINISHED_NXDOMAIN` for the address | The browser's secure DNS bypasses Tailscale's MagicDNS. Turn **Use secure DNS** off in Chrome or Edge, or check that Tailscale's **Use Tailscale DNS settings** is on. |
+| `t3-dev phone` says "address not published" | The watch service could not reach `tailscale.exe`. Run `t3-dev sync` in a terminal. |
 
 ### Verifying a download
 

@@ -30,7 +30,7 @@ t3-dev setup    # 只需一次
 
 接著在 T3 Code：**Settings → Connections → Add environment → SSH**，選 `t3-<資料夾名稱>`。第一次連到某個容器時，桌面程式會把伺服器（約 90 MB）下載到容器的資料 volume；之後的連線和容器重建都會沿用它，直到桌面程式更新為止。
 
-其他環境請看[不使用 helper 連線](#不使用-helper-連線)。
+其他環境請看[不使用 helper 連線](#不使用-helper-連線)。想從手機使用這些專案，請看[手機存取](../../README.zh-TW.md#手機存取)。
 
 ## 選項
 
@@ -172,7 +172,7 @@ Host t3-myproject
 ## 安全性說明
 
 - **伺服器的來源。** 桌面程式從 T3 Code 的 GitHub release 下載伺服器，並和同一個 release 裡的 `SHA256SUMS` 比對。這能發現下載損壞，但防不了整個 release 被替換；桌面程式本身也是從同一處下載的。到 0.3（`:0`）為止，這個 Feature 改用本 repo 裡釘住的雜湊，代價是所有專案都綁在同一個版本上。
-- **沒有對外的監聽面。** 伺服器只監聽容器內的 loopback，沒有發布任何東西。其他容器和主機都連不到它；唯一的入口是 `docker exec`。
+- **沒有對外的監聽面。** 伺服器只監聽容器內的 loopback，沒有發布任何東西。其他容器和主機都連不到它；唯一的入口是 `docker exec`。`t3-dev` 的[手機存取](../../README.zh-TW.md#手機存取)開啟時，就是經由這個入口把伺服器轉送給你的 Tailscale 裝置。
 - **免密碼的 SSH，以及原因。** SSH 入口不需要金鑰或密碼就接受 remote user。它只能經由 `docker exec` 到達，而 `docker exec` 本來就能完整存取容器，所以加上金鑰也擋不住任何人。為了讓這行得通，Feature 會清空 remote user 的密碼。映像的系統 SSH 設定仍保持 `PermitEmptyPasswords` 的預設值 `no`，所以你自己執行的 SSH daemon 依然會拒絕這種登入。不要讓其他 SSH daemon 使用 `/usr/local/share/t3-server/sshd_config`，也不要對它發布連接埠。
 - **存下來的環境。** 容器的環境可能包含透過 `containerEnv` 設定的憑證，它會為 SSH 連線存在 `/run/t3-server/session-env`，只有 remote user 讀得到。該使用者的程序讀得到它，就像它們讀得到自己的環境一樣。
 - **原始的伺服器 log 可能含有管理用的配對 token。** `t3-server logs` 會把它濾掉。不要分享 `~/.t3/ssh-launch/` 底下的原始檔案。

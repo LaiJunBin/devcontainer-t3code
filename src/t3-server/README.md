@@ -30,7 +30,7 @@ From then on the list of hosts follows your containers by itself. Where the WSL 
 
 Then in T3 Code: **Settings → Connections → Add environment → SSH**, and pick `t3-<folder name>`. The first connection to a container downloads the server (about 90 MB) into the container's data volume; later connections and rebuilds reuse it until the app updates.
 
-For other setups, see [Connecting without the helper](#connecting-without-the-helper).
+For other setups, see [Connecting without the helper](#connecting-without-the-helper). To use the projects from a phone as well, see [Phone access](../../README.md#phone-access).
 
 ## Options
 
@@ -172,7 +172,7 @@ Host t3-myproject
 ## Security notes
 
 - **Where the server comes from.** The app downloads the server from T3 Code's GitHub release and checks it against the `SHA256SUMS` file of the same release. That catches a damaged download, not a release that was replaced as a whole; the desktop app itself comes from the same releases. Up to 0.3 (`:0`) this feature pinned hashes in this repository instead, at the cost of tying every project to one version.
-- **No listening surface.** The server listens on loopback inside the container and nothing is published. Other containers and the host cannot connect to it; the only way in is `docker exec`.
+- **No listening surface.** The server listens on loopback inside the container and nothing is published. Other containers and the host cannot connect to it; the only way in is `docker exec`. `t3-dev`'s [phone access](../../README.md#phone-access), when you turn it on, uses that way to forward the server to your Tailscale devices.
 - **Password-less SSH, and why.** The SSH entry point accepts the remote user without a key or password. It is reachable only through `docker exec`, which already grants full access to the container, so a key would not keep anyone out. To make this work the feature empties the remote user's password. The image's system SSH configuration keeps `PermitEmptyPasswords` at its default of `no`, so an SSH daemon you run yourself still refuses that login. Do not point another SSH daemon at `/usr/local/share/t3-server/sshd_config`, and do not publish a port to it.
 - **The saved environment.** The container's environment, which can include credentials set through `containerEnv`, is saved for SSH sessions in `/run/t3-server/session-env`, readable by the remote user only. Processes of that user can read it, as they can read their own environment.
 - **The raw server log can contain an administrative pairing token.** `t3-server logs` filters it out. Do not share the raw files under `~/.t3/ssh-launch/`.
