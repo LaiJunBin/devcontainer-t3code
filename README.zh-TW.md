@@ -52,7 +52,9 @@
 | `t3-dev list`    | 顯示執行中容器的主機：主機名稱、加入 T3 Code 後顯示的名稱，以及容器 ID。加上 `-a` 會一併列出已停止的容器。除非設了 `T3_SERVER_LABEL` 或兩個專案的資料夾同名，否則兩個名稱相同。 |
 | `t3-dev version` | 印出工具的版本。它和 Feature 分開編號，見[版本](#版本)。                                               |
 | `t3-dev update`  | 從最新的 release 下載 `t3-dev`、檢查它（見下方）、顯示新舊版本，經你確認後取代自己；`--yes` 可跳過詢問。完成後重跑 `setup`。 |
-| `t3-dev remove`  | 停止服務，並把那行 `Include` 和它自己的檔案移除。                                                      |
+| `t3-dev hub init` | 建立 hub：一個沒有專案的 dev container，作為手機的入口（見[手機存取](#手機存取)）。 |
+| `t3-dev phone`   | 透過 Tailscale 從手機存取：`on`、`off`、`pair <host>`、`revoke`；不加參數時顯示入口網址與各專案的狀態（見[手機存取](#手機存取)）。 |
+| `t3-dev remove`  | 停止服務、關閉手機存取，並把那行 `Include` 和它自己的檔案移除。                                        |
 
 除此之外它不會更動 Windows 上的任何東西。`remove` 是就當下的 SSH 設定檔進行編輯，只刪掉 `setup` 加的那一行，所以這段期間你或其他工具寫進去的內容都會保留；備份檔永遠不會被還原回去。
 
@@ -65,6 +67,39 @@ WSL 發行版若沒有使用者層級的 systemd，`setup` 會告訴你，之後
 資料夾會一直保有它拿到的主機名稱。兩個資料夾同名的專案，會依第一次出現的順序拿到 `t3-<資料夾>` 和 `t3-<資料夾>-2`，其中一個停止或啟動都不會讓另一個改變。容器被移除時（重建就會這樣），它的主機會從清單消失，但名稱仍然保留給那個資料夾：只要資料夾還在，該資料夾的下一個容器就會拿回同一個名稱。不過兩個專案在 T3 Code 裡仍然都叫 `t3-<資料夾>`，因為每個伺服器替自己命名時並不知道另一個的存在；`t3-dev list` 會指出這種情況，在其中一個專案設定 `T3_SERVER_LABEL` 就能在 T3 Code 裡區分。
 
 Feature 只有在專案掛載於 `/workspaces/<資料夾>` 時才推得出資料夾名稱。其他情況（例如 Docker Compose 的專案）T3 Code 會顯示容器 ID。`sync` 會替這種環境取和主機相同的名稱，做法是把名稱寫進容器裡的 `/etc/machine-info`，也就是 T3 Code 讀取名稱的那個檔案。伺服器是在啟動時讀這個檔案的，所以容器若是在兩分鐘內才啟動（這時不可能有工作在執行），`sync` 會重啟伺服器。執行超過這段時間的容器則不會被重啟；`t3-dev list` 會提示這點，名稱會在容器下次啟動時生效，或在容器內執行 `t3-server restart` 後生效。映像自帶的 `/etc/machine-info` 不會被更動；Feature 已經命名的環境（包含設了 `T3_SERVER_LABEL` 的）也不會。
+
+## 手機存取
+
+手機的瀏覽器也能經由 [Tailscale](https://tailscale.com/) 在任何地方使用所有專案：和電腦上看到的是同樣的 thread，而且即時同步。在你開啟之前，這個功能都是關閉的。
+
+```
+手機 ──Tailscale HTTPS──► Windows：tailscale serve ──► WSL 127.0.0.1:<連接埠>
+     ──► 每個專案一個 systemd socket ──► docker exec ──► 該專案的 T3 Code 伺服器
+```
+
+每個專案有一個固定的網址 `https://<電腦>.<tailnet>.ts.net:<連接埠>`，和 SSH 主機名稱一樣依資料夾保留。瀏覽器是依網址分別保存環境清單的，所以手機一律從同一個入口進入，也就是 **hub**：一個沒有專案的 dev container，它的 T3 Code 伺服器只負責提供網頁版。每個專案在 hub 裡加入一次，之後打開 hub 就會看到全部。
+
+### 設定（只需一次）
+
+1. 在 Windows 和手機安裝 Tailscale，用同一個帳號登入。在 Tailscale 管理頁面開啟 **MagicDNS** 和 **HTTPS Certificates**。
+2. 執行 `t3-dev hub init`，用 VS Code 打開它指出的資料夾，選 **Reopen in Container**。關閉視窗後 hub 會繼續執行，Docker 啟動時也會自動啟動它。
+3. 在 T3 Code：**Add environment → SSH → t3-hub**。桌面程式會像對待其他專案一樣啟動 hub 的伺服器，並讓它維持和桌面程式相同的版本。
+4. 執行 `t3-dev phone on`。它會印出入口網址和各專案。
+5. 執行 `t3-dev phone pair hub`，在手機上打開那個連結。把之後顯示的入口網址加入書籤。
+6. 對每個專案：執行 `t3-dev phone pair <host>`，在手機的入口裡進入 **Settings → Connections → Add environment**，貼上連結。不要直接打開專案的連結，否則手機會把那個專案當成另一個入口。
+
+`t3-dev phone` 會標出還沒加入手機的專案。新專案只需要做第 6 步。
+
+連結在十分鐘內有效，而且只能用一次。若有安裝 [`qrencode`](https://fukuchi.org/works/qrencode/)，`pair` 也會印出可掃描的 QR code。
+
+### 需要知道的事
+
+- **電腦必須開著，而且每個容器啟動後，T3 Code 桌面程式要連線過**：伺服器是在桌面程式連線時才啟動的。已停止的容器，或伺服器沒在執行的容器，不會回應手機。
+- **每個專案的伺服器都能被你 tailnet 裡的所有裝置連到**，但仍受 T3 Code 自己的登入保護。請讓 tailnet 只包含你自己的裝置，或用 Tailscale 的存取規則限制，並替 Tailscale 帳號開啟兩步驟驗證。
+- **手機遺失時：** `t3-dev phone revoke` 會讓所有執行中專案裡的手機和平板登出；把已停止的專案啟動後再執行一次。`t3-dev phone off` 會移除所有網址和 socket。
+- **VS Code 打開 hub 時會套用你的預設 Feature**，包括 Claude Code 和共用的 Claude 登入。hub 沒有專案，但連到它的連線能使用裡面安裝的東西。
+- 如果背景服務呼叫不到 `tailscale.exe`，新專案的網址就不會被發布；`t3-dev phone` 會顯示這個狀況，在終端機執行 `t3-dev sync` 即可發布。
+- 在 iOS 16 直向畫面下，T3 Code 可能不會顯示 agent 附選項的提問。把手機轉成橫向一次，轉回直向後選項仍會保留。
 
 ### 驗證下載的檔案
 

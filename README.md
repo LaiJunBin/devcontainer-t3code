@@ -50,7 +50,9 @@ Options, compatibility, other setups, troubleshooting and security notes are in 
 | `t3-dev list`   | Shows the hosts of running containers: the host, the name T3 Code shows for it once added, and the container ID. `-a` adds stopped containers. The two names are the same unless `T3_SERVER_LABEL` is set or two projects share a folder name. |
 | `t3-dev version` | Prints the tool's version. It is numbered separately from the feature; see [Versions](#versions).   |
 | `t3-dev update` | Downloads `t3-dev` from the latest release, checks it (see below), shows the old and new version, and replaces itself after you confirm; `--yes` skips the question. Then reruns `setup`. |
-| `t3-dev remove` | Stops the service and takes the `Include` line and its own files out again.                            |
+| `t3-dev hub init` | Sets up the hub, a dev container without a project that is the phone's entry point (see [Phone access](#phone-access)). |
+| `t3-dev phone` | Phone access over Tailscale: `on`, `off`, `pair <host>`, `revoke`, and without an argument the entry address and each project's state (see [Phone access](#phone-access)). |
+| `t3-dev remove` | Stops the service, turns phone access off, and takes the `Include` line and its own files out again.     |
 
 It changes nothing else on Windows. `remove` edits the SSH config as it is at that moment and deletes only the line `setup` added, so whatever you or other tools wrote to the file in between is kept; the backup is never copied back.
 
@@ -63,6 +65,39 @@ Each SSH host is named `t3-<project folder>`, lowercased, with anything outside 
 A folder keeps the host it was given. Two projects with the same folder name get `t3-<folder>` and `t3-<folder>-2` in the order they were first seen, and neither changes when the other stops or starts. Removing a container, as a rebuild does, takes its host off the list but not away from the folder: the name stays reserved while the folder exists, and the next container of that folder gets it back. Both projects are still called `t3-<folder>` in T3 Code, because each server names itself without knowing about the other; `t3-dev list` points this out, and a `T3_SERVER_LABEL` in one of them tells them apart there.
 
 The feature can only work out the folder's name for a project mounted at `/workspaces/<folder>`. For any other, a Docker Compose project for example, T3 Code would show the container ID. `sync` gives such an environment its host's name, by writing it to `/etc/machine-info` in the container, the file T3 Code reads the name from. The server reads that file when it starts, so `sync` restarts the server if the container started within the last two minutes, when no work can be running yet. A container that has been up longer keeps its server; `t3-dev list` then says so, and the name applies the next time the container starts, or after `t3-server restart` in it. A `/etc/machine-info` the image brought along is left as it is, and so is any environment the feature did name, including one with `T3_SERVER_LABEL`.
+
+## Phone access
+
+A phone's browser can use every project too, from anywhere, over [Tailscale](https://tailscale.com/): the same threads as on the PC, live. It is off until you turn it on.
+
+```
+phone ──Tailscale HTTPS──► Windows: tailscale serve ──► WSL 127.0.0.1:<port>
+      ──► one systemd socket per project ──► docker exec ──► the project's T3 Code server
+```
+
+Each project gets a fixed address, `https://<PC>.<tailnet>.ts.net:<port>`, kept per folder like its SSH host. The browser keeps its list of environments per address, so the phone always opens one entry, the **hub**: a dev container without a project whose T3 Code server only serves the web app. Projects are added in the hub once each; after that, opening the hub shows all of them.
+
+### Setting it up, once
+
+1. Install Tailscale on Windows and on the phone, signed in to the same account. In the Tailscale admin console turn on **MagicDNS** and **HTTPS Certificates**.
+2. `t3-dev hub init`, then open the folder it names in VS Code and **Reopen in Container**. The hub keeps running when the window closes and starts with Docker.
+3. In T3 Code: **Add environment → SSH → t3-hub**. The app starts the hub's server, as for any project, and keeps it on the app's version.
+4. `t3-dev phone on`. It prints the entry address and the projects.
+5. `t3-dev phone pair hub`, and open that link on the phone. Bookmark the entry address it then shows.
+6. For each project: `t3-dev phone pair <host>`, and on the phone, in the entry, **Settings → Connections → Add environment**, paste the link. Do not open project links directly: the phone would then treat that project as a separate entry.
+
+`t3-dev phone` marks the projects not on the phone yet. A new project needs only step 6.
+
+Links are valid for ten minutes and once. With [`qrencode`](https://fukuchi.org/works/qrencode/) installed, `pair` also prints a QR code to scan.
+
+### What to know
+
+- **The PC has to be on, with the T3 Code app having connected** since each container started: servers start when the app connects. A container that is stopped, or whose server is not running, does not answer the phone.
+- **Every project's server is reachable from every device in your tailnet**, behind T3 Code's own sign-in. Keep the tailnet to your own devices, or restrict it with Tailscale's access rules, and protect the Tailscale account with two-factor sign-in.
+- **A lost phone:** `t3-dev phone revoke` signs phones and tablets out of every running project; start the stopped ones and run it again. `t3-dev phone off` removes the addresses and sockets.
+- **The hub picks up your default features** when VS Code opens it, Claude Code and a shared Claude login included. It holds no project, but a session on it can use what is installed there.
+- If the watch service cannot reach `tailscale.exe`, a new project's address is not published; `t3-dev phone` then shows it, and `t3-dev sync` in a terminal publishes it.
+- On iOS 16 in portrait, T3 Code may not show an agent's question with options. Turn the phone to landscape once; the options stay when you turn it back.
 
 ### Verifying a download
 
