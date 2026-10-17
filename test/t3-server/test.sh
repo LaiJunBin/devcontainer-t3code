@@ -51,8 +51,13 @@ data_dir_belongs_to_the_user() {
     [ "$(stat -c %a "$DATA_DIR")" = "700" ]
 }
 
+# The home directory has to be the user's own, the one sshd logs in to.
 home_links_to_the_data_volume() {
-  [ "$(readlink -f "${T3_SERVER_USER_HOME}/.t3")" = "$DATA_DIR" ]
+  local passwd_home
+  passwd_home="$(getent passwd "$T3_SERVER_USER" | cut -d: -f6)"
+  echo "config home: ${T3_SERVER_USER_HOME}, user database: ${passwd_home}, ~/.t3 -> $(readlink "${passwd_home}/.t3" 2>&1)"
+  [ "$T3_SERVER_USER_HOME" = "$passwd_home" ] &&
+    [ "$(readlink -f "${T3_SERVER_USER_HOME}/.t3")" = "$DATA_DIR" ]
 }
 
 no_server_in_the_image() {

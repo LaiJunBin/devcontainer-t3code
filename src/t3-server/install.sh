@@ -52,10 +52,25 @@ for removed in VERSION AUTOSTART HOST SSH; do
   fi
 done
 
-# These two are written into sourced or parsed config files, so keep them literal.
+# Written into sourced or parsed config files, so keep it literal.
 case "$REMOTE_USER" in
   "" | *[!A-Za-z0-9._-]*) fail "unexpected remote user name '${REMOTE_USER}'" ;;
 esac
+if [ "$REMOTE_USER" = "root" ]; then
+  unsupported "the SSH entry point needs a non-root remoteUser; set remoteUser in devcontainer.json"
+fi
+id "$REMOTE_USER" >/dev/null 2>&1 || unsupported "the remote user '${REMOTE_USER}' does not exist in the image"
+
+# The home directory sshd gives the user is the one in the user database, and
+# that is where the app looks for ~/.t3. _REMOTE_USER_HOME is worked out from
+# the base image before any feature runs, so for a user that a feature such
+# as common-utils creates it can point somewhere else, often /root.
+passwd_home="$(getent passwd "$REMOTE_USER" 2>/dev/null | cut -d: -f6)"
+if [ -n "$passwd_home" ] && [ "$passwd_home" != "$REMOTE_USER_HOME" ]; then
+  echo "t3-server feature: using ${REMOTE_USER}'s home directory ${passwd_home} from the user database instead of ${REMOTE_USER_HOME}"
+  REMOTE_USER_HOME="$passwd_home"
+fi
+# Also written into config files.
 case "$REMOTE_USER_HOME" in
   /*) ;;
   *) fail "remote user home must be an absolute path, got '${REMOTE_USER_HOME}'" ;;
@@ -63,10 +78,6 @@ esac
 case "$REMOTE_USER_HOME" in
   *[!A-Za-z0-9._/-]*) fail "unexpected characters in remote user home '${REMOTE_USER_HOME}'" ;;
 esac
-if [ "$REMOTE_USER" = "root" ]; then
-  unsupported "the SSH entry point needs a non-root remoteUser; set remoteUser in devcontainer.json"
-fi
-id "$REMOTE_USER" >/dev/null 2>&1 || unsupported "the remote user '${REMOTE_USER}' does not exist in the image"
 
 [ "$(uname -s)" = "Linux" ] || unsupported "only Linux containers are supported"
 case "$(uname -m)" in
