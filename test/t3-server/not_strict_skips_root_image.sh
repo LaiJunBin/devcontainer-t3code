@@ -1,6 +1,6 @@
 #!/bin/bash
-# A root-only image cannot use the ssh option. With "strict": false the feature
-# must step aside and leave a container that starts normally.
+# A root-only image has no user for the SSH entry point. With "strict": false
+# the feature must step aside and leave a container that starts normally.
 set -e
 
 # shellcheck source=/dev/null

@@ -10,7 +10,7 @@ Two parts:
 
 | Part                                   | Where it runs        | What it does                                                                                   |
 | -------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------- |
-| [`t3-server`](src/t3-server/README.md) | in the dev container | A dev container feature: installs a hash-verified T3 Code server, starts it, and offers an SSH entry point that is only reachable through `docker exec`. |
+| [`t3-server`](src/t3-server/README.md) | in the dev container | A dev container feature: an SSH entry point that is only reachable through `docker exec`, a data volume, and a name for the environment. The desktop app installs and starts a server of its own version through it, so the feature does not change when T3 Code updates. |
 | [`t3-dev`](host/t3-dev)                | on the Docker host   | Registers each such container as an SSH host for the desktop app. Written for Docker inside WSL with T3 Code on Windows. |
 
 ## Quick start (Windows, Docker in WSL)
@@ -19,7 +19,7 @@ Two parts:
 
    ```jsonc
    "features": {
-     "ghcr.io/laijunbin/devcontainer-t3code/t3-server:0": {}
+     "ghcr.io/laijunbin/devcontainer-t3code/t3-server:1": {}
    }
    ```
 
@@ -88,10 +88,12 @@ The feature and `t3-dev` are versioned and released separately, because updating
 
 | Part      | Version is in                             | Released as                                                                  | You get it by                                              |
 | --------- | ----------------------------------------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| Feature   | `src/t3-server/devcontainer-feature.json` | `ghcr.io/laijunbin/devcontainer-t3code/t3-server:<version>`, git tag `feature_t3-server_<version>` | rebuilding the dev container, which downloads the server (about 70 MB) again |
+| Feature   | `src/t3-server/devcontainer-feature.json` | `ghcr.io/laijunbin/devcontainer-t3code/t3-server:<version>`, git tag `feature_t3-server_<version>` | rebuilding the dev container                               |
 | `t3-dev`  | `T3_DEV_VERSION` in `host/t3-dev`         | GitHub release and git tag `t3-dev-v<version>`                               | `t3-dev update`, a few seconds                             |
 
 Any `t3-dev` works with any feature version; neither has to be updated because the other was. One thing depends on the feature's version: from feature 0.3.1 on, the environment is called `t3-<folder>` in T3 Code, like its host. With an older feature in a container, T3 Code shows the container ID, and so does `t3-dev list`.
+
+T3 Code's own version is not tied to either. From feature 1.0.0 (`:1`) on, the desktop app installs a server of its own version in each container when it connects, and replaces it after the app updates. Up to 0.3 (`:0`) the feature pinned one T3 Code version into the image, so every T3 Code update meant a new feature release and a rebuild of every project, done before updating the app.
 
 ## Support
 
@@ -99,12 +101,9 @@ Maintained on a best-effort basis. What is known to work is what the **Test** wo
 
 ## Maintaining
 
-### Supporting a new T3 Code version
+### A new T3 Code version
 
-1. Download `t3-<version>-linux-x64.tar.gz` and `t3-<version>-linux-arm64.tar.gz` from the official release page.
-2. Run `sha256sum` on both and add the two lines to `src/t3-server/versions.sh`. Compute the hashes yourself; do not copy them from the release's `SHA256SUMS`, which is what the pin is meant to be independent of.
-3. Update the default and `proposals` of the `version` option, the version in `test/t3-server/test.sh`, and bump the feature's own `version` in `devcontainer-feature.json`. `t3-dev` does not change.
-4. Push, wait for the **Test** workflow to pass, then run the **Release** workflow.
+Nothing to do: the desktop app brings its own server. The `app_launch` test scenario pins the release it installs (`APP_VERSION` and its hashes in `test/t3-server/test.sh`); move it forward now and then so the test follows what users run.
 
 ### Workflows
 
@@ -115,7 +114,7 @@ Maintained on a best-effort basis. What is known to work is what the **Test** wo
 
 Third-party actions are pinned to commit SHAs. Releasing is manual so that what is published only changes on purpose. Only the release's second job can write to the repository.
 
-To release, bump the version of the part that changed and run **Release**. A part whose version is already tagged is skipped, so releasing `t3-dev` alone does not make projects download the server again. If a part's files changed but its version did not, the workflow stops and says which one to bump, instead of skipping it or publishing new content under a used number. A change to only the documentation in the feature's folder does not count.
+To release, bump the version of the part that changed and run **Release**. A part whose version is already tagged is skipped, so releasing `t3-dev` alone does not make projects rebuild. If a part's files changed but its version did not, the workflow stops and says which one to bump, instead of skipping it or publishing new content under a used number. A change to only the documentation in the feature's folder does not count.
 
 Turn on **Settings → General → Releases → Enable release immutability** in the repository. GitHub then locks each release's tag and files once it is published, so not even the owner's account can swap them later.
 
@@ -127,11 +126,10 @@ The first release creates a private package. Open the package's settings on GitH
 src/t3-server/
   devcontainer-feature.json   metadata, options, volume, entrypoint
   install.sh                  build-time install (runs as root)
-  versions.sh                 pinned archive hashes
-  scripts/entrypoint.sh       starts the server when the container starts
-  scripts/t3-server           status / start / stop / restart / logs
+  scripts/entrypoint.sh       names the environment and prepares the volume at container start
+  scripts/t3-server           status / stop / logs / label, and the preparation steps
   scripts/ssh-session         one SSH session over docker exec
-  scripts/t3-pair             pairing link helper, for the published-port setup
+  scripts/ssh-env.sh          restores the container's environment in those sessions' login shells
   README.md                   user documentation (README.zh-TW.md: Traditional Chinese)
 host/t3-dev                   host-side helper (WSL)
 test/t3-server/test.sh        checks run by `devcontainer features test`

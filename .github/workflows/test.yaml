@@ -21,10 +21,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: shellcheck
         run: |
-          shellcheck src/t3-server/install.sh src/t3-server/versions.sh \
+          shellcheck src/t3-server/install.sh \
             src/t3-server/scripts/entrypoint.sh src/t3-server/scripts/ssh-session \
             src/t3-server/scripts/t3-server host/t3-dev \
-            src/t3-server/scripts/t3-pair test/t3-server/*.sh
+            src/t3-server/scripts/ssh-env.sh test/t3-server/*.sh
       # The two are versioned separately; the Release workflow reads both.
       - name: the feature and t3-dev each state a version
         run: |

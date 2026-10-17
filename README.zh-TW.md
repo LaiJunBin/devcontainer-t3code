@@ -10,7 +10,7 @@
 
 | 部分                                         | 執行位置          | 做什麼                                                                                   |
 | -------------------------------------------- | ----------------- | ---------------------------------------------------------------------------------------- |
-| [`t3-server`](src/t3-server/README.zh-TW.md) | dev container 裡  | 一個 dev container Feature：安裝經過雜湊驗證的 T3 Code 伺服器、啟動它，並提供只能透過 `docker exec` 進入的 SSH 入口。 |
+| [`t3-server`](src/t3-server/README.zh-TW.md) | dev container 裡  | 一個 dev container Feature：提供只能透過 `docker exec` 進入的 SSH 入口、資料 volume，以及環境名稱。桌面程式經由它安裝並啟動和自己同版本的伺服器，所以 T3 Code 改版時 Feature 不必跟著改。 |
 | [`t3-dev`](host/t3-dev)                      | 執行 Docker 的主機 | 把每個這樣的容器登記成桌面程式看得到的 SSH 主機。針對「Docker 裝在 WSL、T3 Code 裝在 Windows」的情境撰寫。 |
 
 ## 快速開始
@@ -21,7 +21,7 @@
 
    ```jsonc
    "features": {
-     "ghcr.io/laijunbin/devcontainer-t3code/t3-server:0": {}
+     "ghcr.io/laijunbin/devcontainer-t3code/t3-server:1": {}
    }
    ```
 
@@ -90,10 +90,12 @@ Feature 和 `t3-dev` 各自編號、各自發布，因為更新兩者的代價�
 
 | 部分     | 版本記在                                  | 發布成                                                                       | 取得方式                                           |
 | -------- | ----------------------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------- |
-| Feature  | `src/t3-server/devcontainer-feature.json` | `ghcr.io/laijunbin/devcontainer-t3code/t3-server:<版本>`，git tag `feature_t3-server_<版本>` | 重建 dev container，會重新下載伺服器（約 70 MB）   |
+| Feature  | `src/t3-server/devcontainer-feature.json` | `ghcr.io/laijunbin/devcontainer-t3code/t3-server:<版本>`，git tag `feature_t3-server_<版本>` | 重建 dev container                                 |
 | `t3-dev` | `host/t3-dev` 裡的 `T3_DEV_VERSION`       | GitHub release 與 git tag `t3-dev-v<版本>`                                   | `t3-dev update`，幾秒鐘                            |
 
 任何版本的 `t3-dev` 都能搭配任何版本的 Feature；其中一個更新不代表另一個也要更新。只有一件事和 Feature 的版本有關：從 Feature 0.3.1 起，環境在 T3 Code 裡叫做 `t3-<資料夾>`，和主機名稱一致。容器裡若是更舊的 Feature，T3 Code 會顯示容器 ID，`t3-dev list` 也是。
+
+T3 Code 本身的版本和這兩者都無關。從 Feature 1.0.0（`:1`）起，桌面程式連線時會在每個容器裡安裝和自己同版本的伺服器，桌面程式更新後也會自動換掉它。到 0.3（`:0`）為止，Feature 把一個固定的 T3 Code 版本裝進映像，所以 T3 Code 每次改版，都得先發布新版 Feature、重建所有專案，才能更新桌面程式。
 
 ## 支援範圍
 
@@ -101,12 +103,9 @@ Feature 和 `t3-dev` 各自編號、各自發布，因為更新兩者的代價�
 
 ## 維護
 
-### 支援新的 T3 Code 版本
+### T3 Code 出了新版
 
-1. 從官方 release 頁面下載 `t3-<版本>-linux-x64.tar.gz` 和 `t3-<版本>-linux-arm64.tar.gz`。
-2. 對兩個檔案執行 `sha256sum`，把這兩行加進 `src/t3-server/versions.sh`。雜湊值請自己算，不要從 release 的 `SHA256SUMS` 複製；釘住雜湊的用意就是要獨立於那個檔案。
-3. 更新 `version` 選項的預設值和 `proposals`、`test/t3-server/test.sh` 裡的版本，並調高 `devcontainer-feature.json` 裡 Feature 自己的 `version`。`t3-dev` 不用動。
-4. Push，等 **Test** workflow 通過，再執行 **Release** workflow。
+什麼都不用做：桌面程式會自己帶來伺服器。`app_launch` 測試情境釘住了它要安裝的版本（`test/t3-server/test.sh` 裡的 `APP_VERSION` 和雜湊）；偶爾把它往前調，讓測試跟上使用者實際在用的版本。
 
 ### Workflow
 
@@ -117,7 +116,7 @@ Feature 和 `t3-dev` 各自編號、各自發布，因為更新兩者的代價�
 
 第三方 action 都釘在 commit SHA 上。發布採手動，是為了讓已發布的內容只在有意為之時才改變。只有 release 的第二個 job 能寫入 repo。
 
-發布方式：調高有改動那一部分的版本，然後執行 **Release**。版本已經有 tag 的部分會被跳過，所以單獨發布 `t3-dev` 不會讓各專案重新下載伺服器。如果某部分的檔案變了、版本卻沒變，workflow 會停下來並指出該調高哪一個，而不是默默跳過，或用舊的版本號發布新內容。只改 Feature 資料夾裡的說明文件不算變更。
+發布方式：調高有改動那一部分的版本，然後執行 **Release**。版本已經有 tag 的部分會被跳過，所以單獨發布 `t3-dev` 不需要重建各專案。如果某部分的檔案變了、版本卻沒變，workflow 會停下來並指出該調高哪一個，而不是默默跳過，或用舊的版本號發布新內容。只改 Feature 資料夾裡的說明文件不算變更。
 
 請在 repo 開啟 **Settings → General → Releases → Enable release immutability**。這樣每個 release 一經發布，GitHub 就會鎖定它的 tag 和檔案，連擁有者的帳號事後都換不掉。
 
@@ -129,11 +128,10 @@ Feature 和 `t3-dev` 各自編號、各自發布，因為更新兩者的代價�
 src/t3-server/
   devcontainer-feature.json   中繼資料、選項、volume、entrypoint
   install.sh                  建置映像時的安裝程序（以 root 執行）
-  versions.sh                 釘住的壓縮檔雜湊
-  scripts/entrypoint.sh       容器啟動時啟動伺服器
-  scripts/t3-server           status / start / stop / restart / logs
+  scripts/entrypoint.sh       容器啟動時設定環境名稱、準備 volume
+  scripts/t3-server           status / stop / logs / label，以及準備步驟
   scripts/ssh-session         透過 docker exec 提供一次 SSH 連線
-  scripts/t3-pair             配對連結小工具，供發布連接埠的做法使用
+  scripts/ssh-env.sh          在那些連線的登入 shell 裡還原容器的環境
   README.md                   使用者文件（README.zh-TW.md 為繁體中文版）
 host/t3-dev                   主機端的 helper（WSL）
 test/t3-server/test.sh        `devcontainer features test` 執行的檢查

@@ -24,5 +24,8 @@ chmod 0755 /run/sshd
 
 # The host key lives in the data volume so it survives image rebuilds.
 /usr/local/bin/t3-server prepare >/dev/null
+# `docker exec` hands this script the container's environment; save it for
+# the login shell, which the app starts its server from (see ssh-env.sh).
+/usr/local/bin/t3-server session-env
 
 exec /usr/sbin/sshd -i -f "${SHARE_DIR}/sshd_config"
